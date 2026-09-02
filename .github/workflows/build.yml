@@ -1,0 +1,88 @@
+name: 빌드
+
+# 태그를 밀면 릴리스용으로, 그 외에는 확인용으로 돈다.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 태그를 밀었을 때 Releases 에 파일을 붙여야 하므로 쓰기가 필요하다.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows 러너에는 .NET Framework 4.x 컴파일러가 들어 있다.
+      # 이 프로젝트는 그것만 쓰므로 SDK 설치 단계가 없다.
+      - name: 컴파일러 확인
+        shell: pwsh
+        run: |
+          $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          if (-not (Test-Path $csc)) { throw "csc.exe 없음: $csc" }
+          Write-Host "csc: $csc"
+
+      - name: 빌드
+        shell: pwsh
+        run: ./build.ps1 -CI
+
+      - name: 산출물 확인
+        shell: pwsh
+        run: Get-ChildItem 'Onuln.exe','Onuln.dll' | Format-Table Name, Length
+
+      - name: 산출물 올리기
+        id: pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: today-widget
+          path: |
+            Onuln.exe
+            Onuln.dll
+          if-no-files-found: error
+
+      # 서명은 CI 가 만든 산출물에만 붙는다.
+      #
+      # SignPath Foundation 은 "저장소에 있는 소스로, 공개된 CI 가, 자기들이 볼 수 있는
+      # 자리에서 빌드한 것" 에만 서명해 준다. 서명이 '누가 만들었는지' 가 아니라
+      # '무엇으로 만들었는지' 를 보증해야 하기 때문이다.
+      # 그래서 로컬 빌드에는 앞으로도 서명이 안 붙는다 - 그건 정상이다.
+      #
+      # 승인되면 아래 주석을 풀고 organization-id 를 채운다.
+      # SIGNPATH_API_TOKEN 은 저장소 Settings → Secrets 에 넣는다.
+      #
+      # - name: 서명 요청 (SignPath Foundation)
+      #   if: startsWith(github.ref, 'refs/tags/v')
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: '<승인 후 발급>'
+      #     project-slug: 'today-widget'
+      #     signing-policy-slug: 'release-signing'
+      #     github-artifact-id: ${{ steps.pack.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: 'signed'
+
+      # 저장소에는 바이너리를 두지 않는다. 받는 곳은 여기 하나뿐이다.
+      # 서명 단계를 켜면 path 를 signed/ 로 바꾼다.
+      - name: 릴리스에 붙이기
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Onuln.exe
+            Onuln.dll
+            launch.vbs
+            launch.ps1
+          body: |
+            ## 받는 법
+
+            네 파일을 **같은 폴더**에 두고 `launch.vbs` 를 실행한다.
+
+            Smart App Control 이 exe 를 막으면 런처가 알아서 DLL 쪽으로 넘어간다.
+            자세한 것은 README 의 '내려받은 파일이 차단될 때' 참고.
