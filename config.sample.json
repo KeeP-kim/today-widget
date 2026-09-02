@@ -1,0 +1,46 @@
+﻿{
+  "version": "0.88",
+
+  "//ecosKey": "한국은행 ECOS 오픈API 인증키. ecos.bok.or.kr → 오픈API 에서 무료 발급. 금리·물가 항목을 쓸 때만 필요하고, 비워두면 나머지는 그대로 동작한다.",
+  "ecosKey": null,
+
+  "//창": "x/y 는 화면 위치, scale 은 배율(0.8~1.8), opacity 는 투명도(0.3~1.0)",
+  "x": null,
+  "y": null,
+  "topmost": true,
+  "scale": 1.2,
+  "opacity": 1,
+  "minimized": false,
+
+  "//섹션": "접으면 해당 API 호출도 멈춘다",
+  "showQuotes": true,
+  "showWeather": true,
+  "showClock": true,
+
+  "//보기": "expanded=목록 펼침, gridView=타일, gridColumns=타일 가로 개수(2~10), listLimit=보일 개수(0=전부)",
+  "symbol": "fx:FX_USDKRW",
+  "bank": "HANA",
+  "expanded": true,
+  "gridView": false,
+  "listLimit": 0,
+  "gridColumns": 2,
+
+  "quoteIntervalSec": 300,
+  "weatherIntervalSec": 600,
+
+  "//업데이트": "새 버전 알림. 따로 넣을 것이 없다 - 기본으로 이 프로젝트의 GitHub 릴리스를 하루 한 번 확인하고, 새 버전이 있으면 카드 맨 아래에 공지 줄이 뜬다(누르면 받는 곳이 열린다). updateUrl 에 다른 https 주소를 넣으면 그쪽을 보며, version 키와 GitHub 형식의 tag_name 키를 둘 다 읽는다. 끄려면 notifyUpdate 를 false 로 (우클릭 메뉴에도 있다). 끄면 아무 것도 조회하지 않는다.",
+  "updateUrl": null,
+  "notifyUpdate": true,
+
+  "//symbols": "kind: fx | index | dstock | wstock | coin | ecos. 위젯에서 + 버튼으로 추가하는 게 편하다.",
+  "symbols": [
+    { "kind": "fx", "code": "FX_USDKRW", "label": "달러" },
+    { "kind": "fx", "code": "FX_JPYKRW", "label": "엔화 100" },
+    { "kind": "index", "code": "KOSPI", "label": "코스피" },
+    { "kind": "coin", "code": "KRW-DOGE", "label": "도지코인" },
+    { "kind": "wstock", "code": "DLTR.O", "label": "달러트리" }
+  ],
+
+  "//weathers": "code 는 네이버 날씨 지역코드(링크용), lat/lon 으로 날씨를 조회한다. 비워두면 첫 실행 때 IP로 자동 감지한다.",
+  "weathers": []
+}
