@@ -14,6 +14,13 @@ namespace DeskWidget
             check(new Config(Path.Combine(work, "journal-config.json")).SparkRefreshIntervalSec == 0, "new config not manual");
             check(DollarSpark.Arguments(work, "gpt-6-astra").Contains("--model gpt-6-astra "), "Astra not routed");
             check(!DollarSpark.Arguments(work, "bad --flag").Contains("bad --flag"), "model injection");
+            check(DollarSpark.ModelId(DollarSpark.LegacyModel) == DollarSpark.Model &&
+                DollarSpark.ModelName(DollarSpark.LegacyModel) == "Spark" && DollarSpark.ModelName(DollarSpark.Model) == "Luna",
+                "old Spark setting or history relabeled incorrectly");
+            string oldConfigPath = Path.Combine(work, "old-spark-config.json");
+            File.WriteAllText(oldConfigPath, "{\"version\":\"1.047\",\"analysisModel\":\"" + DollarSpark.LegacyModel + "\"}");
+            var oldConfig = new Config(oldConfigPath); oldConfig.Load();
+            check(oldConfig.AnalysisModel == DollarSpark.Model, "old Spark selection did not migrate to Luna");
             var window = new DollarAnalysisWindow(new Config(Path.Combine(work, "journal-config.json")), ct => Task.FromResult<DollarAnalysisResult>(null));
             window.ChangeModel("gpt-6-astra"); window.Close();
             var saved = new Config(Path.Combine(work, "journal-config.json")); saved.Load(); check(saved.AnalysisModel == "gpt-6-astra", "model choice not saved");
@@ -28,6 +35,10 @@ namespace DeskWidget
             var paths = Directory.GetFiles(PredictionJournal.Folder, "*.xml");
             check(paths.Length == 1, "forecast not recorded");
             string original = File.ReadAllText(paths[0]);
+            var legacyRecord = new XmlDocument();
+            legacyRecord.LoadXml(original.Replace("model=\"basic\"", "model=\"" + DollarSpark.LegacyModel + "\""));
+            var validRecord = typeof(PredictionJournal).GetMethod("ValidRecord", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+            check((bool)validRecord.Invoke(null, new object[] { legacyRecord.DocumentElement }), "old Spark forecast rejected after model migration");
             quote.ReceivedUtc = now.AddDays(1).AddSeconds(-1); quote.Value = 102;
             PredictionJournal.Observe(quote, quote.ReceivedUtc);
             check(Directory.GetFiles(PredictionJournal.Folder, "*.score.xml").Length == 0, "premature score");
@@ -47,6 +58,16 @@ namespace DeskWidget
             var again = new XmlDocument(); again.Load(scores[0]);
             check(again.DocumentElement.GetAttribute("actual") == "102", "score overwritten");
             check(File.ReadAllText(paths[0]) == original, "forecast rewritten with future data");
+            quote.Value = 100; quote.ReceivedUtc = now;
+            const string submittedMarket = "{\"as_of_utc\":\"fixture\",\"history\":{\"last_completed_value\":99}}";
+            result.Spark = new DollarSparkResult { CheckedUtc = now, MarketSnapshot = submittedMarket };
+            result.Rates.Add(new DollarRate { Date = now.Date.AddDays(-1), Value = 101 });
+            PredictionJournal.Record(result, now);
+            var capturedPath = Directory.GetFiles(PredictionJournal.Folder, "*.xml").First(x => x != paths[0] && !x.EndsWith(".score.xml"));
+            var captured = new XmlDocument(); captured.Load(capturedPath);
+            check(captured.SelectSingleNode("/prediction/aiMarketInput").InnerText == submittedMarket,
+                "journal recomputed AI input from later prices instead of preserving submitted snapshot");
+            check(Config.ScoringEra("1.048") != Config.ScoringEra(Config.AppVersion), "new forecast inputs pooled with old scoring era");
             var brief = new BriefTextBlock { Text = "한국 기준금리 비트코인 삼성전자 브리프 요약입니다. 반대 근거도 함께 표시합니다.", FontSize = 16, Foreground = System.Windows.Media.Brushes.White };
             check(brief.Lines(brief.TextWidth("한국 기준금리") + 1)[0] == "한국 기준금리", "Korean word split");
             check(brief.Lines(brief.TextWidth("비트코인") - 1).Contains("비트코인"), "narrow token split");

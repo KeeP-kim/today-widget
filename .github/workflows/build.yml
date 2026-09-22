@@ -32,6 +32,10 @@ jobs:
         shell: pwsh
         run: ./tests/run.ps1
 
+      - name: 설치 안전 검사
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/InstallerSafetyTests.ps1
+
       - name: 빌드
         shell: pwsh
         run: ./build.ps1 -CI

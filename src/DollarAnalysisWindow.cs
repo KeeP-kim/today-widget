@@ -243,12 +243,12 @@ namespace DeskWidget
             _sparkCountdown.Margin = new Thickness(2, 0, 5, 0); _sparkCountdown.FontSize = 10;
             _sparkCountdown.Click += (s, e) => ShowSparkIntervalMenu();
             Grid.SetColumn(_sparkCountdown, 2); sparkRow.Children.Add(_sparkCountdown);
-            _sparkState = Label("로그인하면 첫 분석 · 선택 모델의 Codex 한도 사용", 10, Palette.TextDim);
+            _sparkState = Label("로그인하면 첫 분석 · Codex 사용량 소모", 10, Palette.TextDim);
             _sparkState.Margin = new Thickness(0, 2, 0, 0); sparkPanel.Children.Add(_sparkState);
             _loginHelp = Label(DollarSpark.LoginHelp + "\n선택한 품목의 공개 기사와 시세 통계를 전송합니다.", 10, Palette.TextDim);
             _loginHelp.Margin = new Thickness(0, 5, 0, 0); _loginHelp.Visibility = Visibility.Collapsed;
             _sparkHelp = new Button { Content = "?", Width = 21, Height = 21, FontSize = 11, Foreground = Palette.TextDim,
-                Template = DollarAnalysisStyles.SmallButton, Cursor = Cursors.Hand, ToolTip = "Spark 연결 도움말", Margin = new Thickness(7, 0, 0, 0) };
+                Template = DollarAnalysisStyles.SmallButton, Cursor = Cursors.Hand, ToolTip = "AI 연결 도움말", Margin = new Thickness(7, 0, 0, 0) };
             _sparkHelp.Click += (s, e) => _loginHelp.Visibility = _loginHelp.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
             Grid.SetColumn(_sparkHelp, 1); sparkRow.Children.Add(_sparkHelp); sparkPanel.Children.Add(_loginHelp);
             _sparkLogin.IsEnabled = !_target.Weather; _sparkCountdown.IsEnabled = !_target.Weather;
@@ -599,7 +599,7 @@ namespace DeskWidget
                     _sparkConnected = true;
                     _sparkDot.Fill = Palette.Online; _sparkDot.ToolTip = "ChatGPT 로그인 확인됨";
                     _sparkLogin.Content = "연결 해제";
-                    _sparkLogin.ToolTip = "이 창의 Spark 분석과 자동 갱신을 끕니다. Codex 계정 로그인은 유지합니다.";
+                    _sparkLogin.ToolTip = "이 창의 AI 분석과 자동 갱신을 끕니다. Codex 계정 로그인은 유지합니다.";
                     _sparkState.Text = "로그인됨 · 첫 분석 시작";
                     startAnalysis = true;
                 }
@@ -620,8 +620,8 @@ namespace DeskWidget
         private void DisconnectSpark()
         {
             _sparkConnected = false; _sparkTimer.Stop(); _nextSparkAt = DateTime.MaxValue;
-            _sparkDot.Fill = Palette.TextFaint; _sparkDot.ToolTip = "Spark 연결 안 됨";
-            _sparkLogin.Content = "로그인"; _sparkLogin.ToolTip = "로그인 확인 후 Spark 분석 시작";
+            _sparkDot.Fill = Palette.TextFaint; _sparkDot.ToolTip = "AI 연결 안 됨";
+            _sparkLogin.Content = "로그인"; _sparkLogin.ToolTip = "로그인 확인 후 AI 분석 시작";
             _sparkState.Text = "AI 연결 해제 · 비교 기준만 갱신";
             UpdateSparkCountdown();
         }
@@ -666,7 +666,7 @@ namespace DeskWidget
                     ? Math.Max(0, Math.Ceiling((_nextSparkAt - _utcNow()).TotalSeconds)).ToString("0", CultureInfo.InvariantCulture)
                     : _sparkInterval.ToString(CultureInfo.InvariantCulture)) + "초";
             _sparkCountdown.ToolTip = _sparkAutoPaused ? "자동 분석 중지 · 갱신 버튼을 눌러 다시 시도하세요" : "클릭하여 갱신 주기 설정 · " + (_sparkInterval == 0 ? "수동" : _sparkInterval + "초 간격") +
-                (_sparkConnected ? " · 분석할 때마다 Spark 한도 사용" : " · 로그인 후 시작");
+                (_sparkConnected ? " · 분석할 때마다 Codex 사용량 소모" : " · 로그인 후 시작");
         }
 
         internal async Task SparkTimerTickAsync()
@@ -950,7 +950,7 @@ namespace DeskWidget
                     "과거 구간의 비교 결과이며, 미래의 성능이나 확률 보정을 보장하지 않습니다.";
             }
             _score.Text = ScoreText(result, now);
-            _score.Text += result.Spark != null ? "Spark의 기간별 판단 점수 · 뉴스 최대 80 / 과거 최대 20. 확률이나 검증된 적중률이 아닙니다." :
+            _score.Text += result.Spark != null ? "AI의 기간별 판단 점수 · 뉴스 최대 80 / 과거 최대 20. 확률이나 검증된 적중률이 아닙니다." :
                 "규칙 참고: 뉴스 요인 최대 80·과거 최대 20점. 기사 요인 기반 계수 0.5, 수집 누락 시 추가 감점.\n24시간 뉴스의 주간 가중 0.5·월간 0.25. 실증 학습된 가중치가 아닙니다.";
             // ★ _summary 는 일간 방향 칸과 같은 개체다 ★
             //   여기서 문구와 색을 정해도 바로 아래 RenderEvidence 가 같은 칸에 ScenarioOutlook 을
@@ -979,10 +979,10 @@ namespace DeskWidget
             bool any = (result.Quote != null && result.Quote.Ok) || result.Rates.Count > 0 || result.DomesticAvailable || result.GlobalAvailable;
             _status.Text = (any ? "조회 완료 " : "조회 실패 ") + result.CheckedUtc.ToLocalTime().ToString("MM-dd HH:mm:ss") +
                 (any && (!result.DomesticAvailable || !result.GlobalAvailable || result.TopicFeedsAvailable < result.TopicFeedsExpected || result.Rates.Count == 0 || result.Quote == null || !result.Quote.Ok) ? " · 일부 자료 누락" : "");
-            _status.Text += "\n" + (!result.Extreme ? "규칙 참고" : result.Spark != null ? DollarSpark.ModelName(result.Spark.ModelId) + " 분석" : string.IsNullOrEmpty(result.SparkStatus) ? "규칙 참고 · Spark 미사용" : result.SparkStatus + " · 규칙 참고");
+            _status.Text += "\n" + (!result.Extreme ? "규칙 참고" : result.Spark != null ? DollarSpark.ModelName(result.Spark.ModelId) + " 분석" : string.IsNullOrEmpty(result.SparkStatus) ? "규칙 참고 · AI 미사용" : result.SparkStatus + " · 규칙 참고");
             _status.Text += " · " + (result.Spark != null ? "주전망" : "비교 기준");
             if (result.Extreme && result.Spark == null) _status.Text += "\nAI 주전망은 아직 생성되지 않았습니다";
-            if (_target.Economic) _method.Text = "현재 ECOS 공표값과 " + result.Rates.Count + "개 월간 관측값을 참고합니다. 월간 값을 일별 가격 패턴으로 바꾸지 않습니다.\n지표 예상값은 기사 근거와 현재 값이 있는 Spark 응답의 절대 변화량으로 표시하며, 금리 변화는 %p입니다.";
+            if (_target.Economic) _method.Text = "현재 ECOS 공표값과 " + result.Rates.Count + "개 월간 관측값을 참고합니다. 월간 값을 일별 가격 패턴으로 바꾸지 않습니다.\n지표 예상값은 기사 근거와 현재 값이 있는 AI 응답의 절대 변화량으로 표시하며, 금리 변화는 %p입니다.";
             if (_target.Weather) { _brief.Text = "Open-Meteo 일평균 기온 예보입니다. 1개월 예보는 제공 범위를 벗어나 표시하지 않습니다."; _status.Text = "Open-Meteo 예보 · " + result.CheckedUtc.ToLocalTime().ToString("MM-dd HH:mm"); }
         }
 
@@ -1000,7 +1000,7 @@ namespace DeskWidget
                 _periodPoints[index].Foreground = DirectionColor(score);
                 _evidenceCounts[index].Text = (score.IsAi ? "인용 " : "검토 ") + score.Evidence.Count + "건";
                 var p = result.Patterns.FirstOrDefault(v => v.Horizon == h) ?? (result.Pattern != null && result.Pattern.Horizon == h ? result.Pattern : null);
-                list.Children.Add(Label((score.IsAi ? "Spark 인용 " : "규칙 산출·교차 확인 ") + score.Evidence.Count + "건 / 검토 " + score.ReviewedCount +
+                list.Children.Add(Label((score.IsAi ? "AI 인용 " : "규칙 산출·교차 확인 ") + score.Evidence.Count + "건 / 검토 " + score.ReviewedCount +
                     "건 · 과거 가격 사례 " + (DollarAnalysis.Fresh(p, now) ? p.Count : 0) + "회 별도", 10, Palette.TextDim));
                 var ai = result.Spark == null ? null : result.Spark.Periods.FirstOrDefault(v => v.Horizon == h);
                 string pressure = _periodDirections[index].Text == "보합" ? Pressure(score) : "";
@@ -1163,7 +1163,7 @@ namespace DeskWidget
             _forecastBasis.Text = "시작: 오늘은 " + (double.IsNaN(anchor) ? "시세 확인 중" : _target.Format(anchor, result.Quote)) + "\n" + _target.PeriodBasis;
             if (double.IsNaN(anchor) || points.Count == 0)
             {
-                _chart.Children.Add(Label(_target.Weather ? "예보 자료를 받지 못했습니다" : "지표 예상값은 Spark로 기사·발표 근거를 분석한 뒤 표시합니다", 11, Palette.TextDim));
+                _chart.Children.Add(Label(_target.Weather ? "예보 자료를 받지 못했습니다" : "지표 예상값은 AI로 기사·발표 근거를 분석한 뒤 표시합니다", 11, Palette.TextDim));
                 return;
             }
             double min = Math.Min(anchor, points.Min(p => p.Value)), max = Math.Max(anchor, points.Max(p => p.Value));
@@ -1184,7 +1184,7 @@ namespace DeskWidget
                     _forecastValues[index].Text = (_target.Weather ? "" : "약 ") + _target.Format(point.Value, result.Quote, true);
                     _forecastChanges[index].Text = _target.Change(anchor, point.Value, result.Quote);
                     _forecastChanges[index].Foreground = point.Value > anchor ? Palette.Up : point.Value < anchor ? Palette.Down : Palette.TextDim;
-                    _forecastStates[index].Text = _target.Weather ? "일평균 예보" : "Spark 시나리오";
+                    _forecastStates[index].Text = _target.Weather ? "일평균 예보" : "AI 시나리오";
                     if (_target.Weather)
                     {
                         _periodDirections[index].Text = "기상 예보"; _periodReasons[index].Text = point.Date.ToString("MM-dd") + " 일평균 기온"; _evidenceCounts[index].Text = "예보 1건";

@@ -44,10 +44,15 @@ namespace DeskWidget
             "1.038",  // 장부의 표본 세는 법 (겹침 제외·모델 중복 제거)
             "1.039",  // 유사 사례 조건 교체 (후보 6개 시도, 채택 규칙 사전 고정, 유의성 미달 명시)
             "1.040",  // 휴일 고시환율 제외, 미국 주식 만기를 거래소 요일로, 장부 기후값을 기간별로
+            "1.049",  // 코인 기사 대상 귀속 교정, AI에 최근 가격과 기간별 환산 기준 전달
+            "1.050",  // Accepted evidence reliability, outcome rules and coin timestamp eligibility.
         };
 
         public static readonly string[][] Changelog =
         {
+            new[] { "1.050", "종목별 지연·체결 시각을 확인하고 오래된 시세를 모든 보기에서 숨긴다", "중복 근거·철회/거절 판정·한글 코인 장부를 고친다", "설치 시 파일과 사용자 기록을 보호하고 검색 취소·저장 실패 안내를 고친다" },
+            new[] { "1.049", "도지코인 영문 기사를 인식하고 다른 코인의 개별 사건이 섞이던 계산을 고친다", "AI에 최근 등락·변동성·실제 예측 기간과 가격 환산 기준을 전달한다", "보낸 숫자 입력을 기록하고 새 예측 성적을 이전 판과 구분한다 · 적중률 개선은 관측 대기" },
+            new[] { "1.048", "Codex Spark 대신 Luna를 기본 분석 모델로 사용한다", "기존 Spark 예측 기록은 모델 이름과 성적을 그대로 보존한다" },
             new[] { "1.047", "기본 종목을 누구에게나 무난한 것으로 바꾼다 (비트코인 · 애플)",
                     "해외주식 검색에 티커를 넣는다 - 한 종목에만 손으로 박아 두던 예외를 없앴다" },
             new[] { "1.046", "성적표가 화면에 없는 옛 이름('극단 규칙')을 찍던 것" },
@@ -1058,9 +1063,9 @@ namespace DeskWidget
             return true;
         }
 
-        public void Save()
+        public bool Save()
         {
-            if (LoadFailed) return;   // 기존 설정을 날리지 않는다
+            if (LoadFailed) return false;   // Preserve a file that could not be loaded.
             try
             {
                 var sb = new StringBuilder(512);
@@ -1210,10 +1215,11 @@ namespace DeskWidget
                 File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
                 if (File.Exists(_path)) File.Replace(tmp, _path, null);
                 else File.Move(tmp, _path);
+                return true;
             }
             catch
             {
-                // 저장 실패는 무시 (읽기 전용 폴더 등)
+                return false;
             }
         }
 
@@ -1350,7 +1356,6 @@ namespace DeskWidget
         }
     }
 }
-
 
 
 

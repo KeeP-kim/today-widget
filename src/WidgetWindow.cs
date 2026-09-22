@@ -120,7 +120,6 @@ namespace DeskWidget
         private DateTime _lastGradeAt = DateTime.MinValue;
         private DateTime _lastQuoteAt = DateTime.MinValue;      // 마지막 '시도' 시각 (대기 시간 계산용)
         private DateTime _lastWeatherAt = DateTime.MinValue;
-        private DateTime _lastQuoteOkAt = DateTime.MinValue;    // 마지막 '성공' 시각 (값이 낡았는지 판단용)
         private bool _forceQuote = true;
         private bool _forceWeather = true;
 
@@ -193,7 +192,6 @@ namespace DeskWidget
         private TextBlock _viewToggle;
         private Ellipse _statusDot;
         private TextBlock _countdown;
-        private bool _lastFetchOk;
         /// <summary>내 조회가 도는 동안 공유 시세 알림을 무시한다. 어차피 Tick 이 더 새 값을 집어 온다.</summary>
         private bool _selfFetching;
         /// <summary>연속 실패 횟수. 실패 뒤 짧게 되돌아오는 간격을 정한다.</summary>
@@ -385,7 +383,6 @@ namespace DeskWidget
             if (_quotes.TryGetValue(def.Key, out previous) && previous.ReceivedUtc > quote.ReceivedUtc) return;
             double surge = NoteSurge(def, quote);
             _quotes[def.Key] = quote;
-            _lastQuoteOkAt = DateTime.UtcNow;
             if (Docked) RefreshDockBar();
             else { RefreshHeader(); RefreshQuote(); RefreshSymbolViews(); }
             if (surge != 0) FlashSurge(new List<SurgeHit> { new SurgeHit { Key = def.Key, Pct = surge } });
@@ -2524,19 +2521,19 @@ namespace DeskWidget
         private void UpdateStatusDot()
         {
             if (_statusDot == null) return;
-            bool ok = _lastFetchOk && !IsStale;
+            bool ok = _cfg.Symbols.Count > 0 && !IsStale;
             _statusDot.Fill = ok ? Palette.Online : Palette.Offline;
-            _statusDot.ToolTip = ok ? "실시간 수신 중" : "연결 끊김 — 값이 갱신되지 않고 있습니다";
+            _statusDot.ToolTip = ok ? "실시간 수신 중" : "일부 시세가 지연되거나 수신되지 않고 있습니다";
         }
 
         /// <summary>
         /// 시계 타이머. 0.5초마다 깨어나지만 SetText 가 값이 바뀔 때만 대입하므로
-        /// 실제 화면 갱신은 초당 1회다. 최소화하거나 시계를 끄면 타이머 자체를 멈춘다.
+        /// 시세가 보이는 동안에는 수신 대기 중에도 지연 상태를 갱신한다.
         /// </summary>
         private void UpdateClockTimer()
         {
             // 시계뿐 아니라 갱신 카운트다운도 이 타이머로 움직인다
-            bool need = Docked
+            bool need = Docked || QuotesActive
                      || (_cfg.Separated && _cfg.ShowClock)
                      || (!_cfg.Minimized && (_cfg.ShowClock || _cfg.Expanded));
 
@@ -2550,10 +2547,19 @@ namespace DeskWidget
             {
                 _clockTimer = new DispatcherTimer(DispatcherPriority.Background);
                 _clockTimer.Interval = TimeSpan.FromMilliseconds(500);
-                _clockTimer.Tick += (s, e) => { UpdateClock(); UpdateCountdown(); };
+                _clockTimer.Tick += (s, e) => { UpdateClock(); UpdateCountdown(); RefreshQuoteAges(); };
             }
             UpdateClock();
             _clockTimer.Start();
+        }
+
+        private DateTime _lastQuoteAgeRefresh;
+        private void RefreshQuoteAges()
+        {
+            if (!QuotesActive || (DateTime.UtcNow - _lastQuoteAgeRefresh).TotalSeconds < 30) return;
+            _lastQuoteAgeRefresh = DateTime.UtcNow;
+            if (Docked) UpdateDockValues();
+            else { RefreshHeader(); RefreshQuote(); RefreshSymbolViews(); }
         }
 
         /// <summary>
@@ -6475,9 +6481,12 @@ namespace DeskWidget
             {
                 var v = _dockViews[i];
                 Quote q;
-                if (!_quotes.TryGetValue(v.Key, out q) || !q.Ok) continue;
+                _quotes.TryGetValue(v.Key, out q);
+                bool stale = QuoteStale(q);
+                SetBrush(v.Price, stale ? Palette.Stale : Palette.Text);
+                v.Box.ToolTip = QuoteStatus(q);
 
-                if (IsDead)
+                if (QuoteDead(q))
                 {
                     SetText(v.Price, "- -");
                     if (v.Ratio != null) { SetText(v.Ratio, ""); SetBrush(v.Ratio, Palette.Flat); }
@@ -6489,7 +6498,7 @@ namespace DeskWidget
                 if (v.Ratio != null)
                 {
                     SetText(v.Ratio, (q.Ratio ?? "") + (q.RatioSuffix ?? ""));
-                    SetBrush(v.Ratio, string.IsNullOrEmpty(q.RatioSuffix) ? Palette.TextDim : Palette.ForDir(q.Dir));
+                    SetBrush(v.Ratio, stale ? Palette.Stale : string.IsNullOrEmpty(q.RatioSuffix) ? Palette.TextDim : Palette.ForDir(q.Dir));
                 }
             }
 
@@ -6576,12 +6585,13 @@ namespace DeskWidget
 
         private Tuple<DockView, UIElement> BuildDockQuote(SymbolDef def, Quote q, bool vertical)
         {
-            // 오래 못 받았으면 숫자를 걸지 않는다 (IsDead 주석 참고)
-            bool dead = IsDead;
+            bool dead = QuoteDead(q);
+            bool stale = QuoteStale(q);
 
-            Brush ratioBrush = string.IsNullOrEmpty(q.RatioSuffix) ? Palette.TextDim : Palette.ForDir(q.Dir);
+            Brush ratioBrush = stale ? Palette.Stale : string.IsNullOrEmpty(q.RatioSuffix) ? Palette.TextDim : Palette.ForDir(q.Dir);
             string ratio = dead ? "" : (q.Ratio ?? "") + (q.RatioSuffix ?? "");
-            bool hasRatio = !dead && !string.IsNullOrEmpty(q.Ratio);
+            // Keep the slot while hiding an expired value so recovery can update it in place.
+            bool hasRatio = !string.IsNullOrEmpty(q.Ratio);
             string shown = dead ? "- -" : q.Price;
 
             BriefTextBlock price, ratioTb = null;
@@ -6592,7 +6602,7 @@ namespace DeskWidget
             {
                 // 좁은 세로 바 - 이름/값/등락을 세 줄로 쌓는다. 글자는 눕히지 않는다.
                 // 긴 숫자는 줄인다. 접혀서 세 줄이 되면 읽히지도 않고 바만 길어진다.
-                price = DockLine(dead ? shown : ShortNumber(shown), f, Palette.Text, true);
+                price = DockLine(dead ? shown : ShortNumber(shown), f, stale ? Palette.Stale : Palette.Text, true);
                 if (hasRatio) ratioTb = DockLine(ratio, f - 2, ratioBrush, true);
 
                 inner.Children.Add(PredictionName(DockLine(def.Label, f - 2, Palette.TextFaint, true), def, true, true));
@@ -6602,7 +6612,7 @@ namespace DeskWidget
             else
             {
                 inner.Orientation = Orientation.Horizontal;
-                price = DockLine(shown, f, Palette.Text, false);
+                price = DockLine(shown, f, stale ? Palette.Stale : Palette.Text, false);
                 if (hasRatio) ratioTb = DockLine(ratio, f - 1, ratioBrush, false, new Thickness(5, 0, 0, 0));
 
                 inner.Children.Add(PredictionName(DockLine(def.Label, f - 1, Palette.TextFaint, false, new Thickness(0, 0, 5, 0)), def, true));
@@ -6644,8 +6654,7 @@ namespace DeskWidget
             };
 
             // 세로 바는 이름도 값도 줄거나 접힌다. 정확한 것은 올려 보면 나오게 한다.
-            if (vertical)
-                box.ToolTip = def.Label + "   " + q.Price + (hasRatio ? "   " + ratio : "");
+            box.ToolTip = QuoteStatus(q);
 
             // ★ 한 번 누르는 것은 여기서 처리하지 않는다 ★
             //   그대로 흘려보내야 바의 '안쪽으로 끌어 떼기' 감시(_dockBar)가 받는다.
@@ -7818,12 +7827,12 @@ namespace DeskWidget
             if (_quotes.TryGetValue(def.Key, out q) && q.Ok)
             {
                 SetText(_sourceLabel, q.Source ?? "");
-                SetText(_timeLabel, (q.Time ?? "") + (IsStale ? " 지연" : ""));
+                SetText(_timeLabel, (q.Time ?? "") + (QuoteStale(q) ? " 지연" : ""));
             }
             else
             {
                 SetText(_sourceLabel, bankable ? (_cfg.Bank == "SHB" ? "신한은행" : "하나은행") : "");
-                SetText(_timeLabel, IsStale ? "지연" : "");
+                SetText(_timeLabel, "수신 대기");
             }
             ApplyStaleStyle();
         }
@@ -7846,32 +7855,73 @@ namespace DeskWidget
         /// </summary>
         private const double DeadHours = 3;
 
-        private bool IsDead
+        // Age belongs to each symbol. A healthy response from another symbol cannot renew it.
+        private static double QuoteAgeSeconds(Quote q)
         {
-            get
+            if (q == null || q.ReceivedUtc == DateTime.MinValue) return double.PositiveInfinity;
+            DateTime oldest = q.ReceivedUtc;
+            if (q.ProviderTimeRequired)
             {
-                if (_lastQuoteOkAt == DateTime.MinValue) return false;   // 아직 첫 수신 전
-                return (DateTime.UtcNow - _lastQuoteOkAt).TotalHours >= DeadHours;
+                if (q.ProviderUtc == DateTime.MinValue || q.TradedUtc == DateTime.MinValue) return double.PositiveInfinity;
+                if (q.ProviderUtc < oldest) oldest = q.ProviderUtc;
+                if (q.TradedUtc < oldest) oldest = q.TradedUtc;
             }
+            return (DateTime.UtcNow - oldest).TotalSeconds;
+        }
+
+        private static bool QuoteDead(Quote q)
+        {
+            if (q == null || !q.Ok) return true;
+            var freshness = Sources.QuoteFreshnessOf(q, DateTime.UtcNow);
+            return freshness == QuoteFreshness.Invalid || freshness == QuoteFreshness.Future
+                || QuoteAgeSeconds(q) >= DeadHours * 3600;
+        }
+
+        private bool QuoteStale(Quote q)
+        {
+            return QuoteDead(q) || QuoteAgeSeconds(q) > _cfg.QuoteIntervalSec * 2.5 + 30
+                || (q.TradedDate != DateTime.MinValue && q.TradedDate != DollarAnalysis.KoreaDate(DateTime.UtcNow))
+                || (q.ProviderTimeRequired && !Sources.IsQuoteFresh(q, DateTime.UtcNow));
+        }
+
+        private string QuoteStatus(Quote q)
+        {
+            if (q == null || !q.Ok) return "시세를 수신하지 못했습니다";
+            var freshness = Sources.QuoteFreshnessOf(q, DateTime.UtcNow);
+            if (freshness == QuoteFreshness.Invalid || freshness == QuoteFreshness.Future)
+                return "시세 시각을 확인할 수 없어 값을 숨겼습니다";
+            double age = QuoteAgeSeconds(q);
+            if (double.IsInfinity(age)) return "시세 수신 시각을 확인할 수 없습니다";
+            if (q.TradedDate != DateTime.MinValue && q.TradedDate != DollarAnalysis.KoreaDate(DateTime.UtcNow))
+                return "이전 거래일 시세 · " + q.TradedDate.ToString("yyyy-MM-dd") + (QuoteDead(q) ? " · 오래된 값을 숨겼습니다" : " · 현재 고시가 아닙니다");
+            if (QuoteStale(q)) return "시세 지연 · 마지막 유효 시각으로부터 " + Math.Max(0, (int)(age / 60)) + "분 경과"
+                + (QuoteDead(q) ? " · 오래된 값을 숨겼습니다" : "");
+            return (q.Source ?? "") + "   " + (q.Time ?? "") + "   " + q.Price;
         }
 
         private bool IsStale
         {
             get
             {
-                if (_lastQuoteOkAt == DateTime.MinValue) return false;   // 아직 첫 수신 전
-                return (DateTime.UtcNow - _lastQuoteOkAt).TotalSeconds > _cfg.QuoteIntervalSec * 2.5 + 30;
+                foreach (var def in _cfg.Symbols)
+                {
+                    Quote q;
+                    if (!_quotes.TryGetValue(def.Key, out q) || QuoteStale(q)) return true;
+                }
+                return false;
             }
         }
 
         private void ApplyStaleStyle()
         {
-            bool stale = IsStale;
+            Quote current = null;
+            var def = CurrentDef;
+            if (def != null) _quotes.TryGetValue(def.Key, out current);
+            bool stale = _cfg.Expanded ? IsStale : QuoteStale(current);
             SetBrush(_timeLabel, stale ? Palette.Stale : Palette.TextGhost);
             if (stale)
             {
-                int min = (int)(DateTime.UtcNow - _lastQuoteOkAt).TotalMinutes;
-                _timeLabel.ToolTip = "마지막 갱신 후 " + min + "분 경과 — 시세를 받아오지 못하고 있습니다";
+                _timeLabel.ToolTip = _cfg.Expanded ? "일부 시세가 지연되었습니다. 각 시세에 마우스를 올려 확인해 주세요." : QuoteStatus(current);
             }
             else if (_timeLabel.ToolTip != null) _timeLabel.ToolTip = null;
         }
@@ -7884,10 +7934,14 @@ namespace DeskWidget
             if (cur == null) return;
 
             Quote q;
-            if (!_quotes.TryGetValue(cur.Key, out q) || !q.Ok)
+            _quotes.TryGetValue(cur.Key, out q);
+            bool stale = QuoteStale(q);
+            SetBrush(_price, stale ? Palette.Stale : Palette.Text);
+            _price.ToolTip = QuoteStatus(q);
+            if (QuoteDead(q))
             {
                 SetText(_price, "- - - -");
-                SetText(_diff, _quotes.ContainsKey(cur.Key) ? "연결 실패" : "");
+                SetText(_diff, q != null && q.Ok ? "시세 지연" : _quotes.ContainsKey(cur.Key) ? "연결 실패" : "");
                 SetBrush(_diff, Palette.Flat);
                 return;
             }
@@ -7902,6 +7956,7 @@ namespace DeskWidget
                 : arrow + " " + q.Diff + "   " + (q.Ratio ?? "") + suffix;
             SetText(_diff, text);
             if (string.IsNullOrEmpty(suffix)) SetBrush(_diff, Palette.TextDim);   // 날씨는 등락 색을 쓰지 않는다
+            if (stale) SetBrush(_diff, Palette.Stale);
         }
 
         private void RefreshSymbolViews()
@@ -7915,8 +7970,11 @@ namespace DeskWidget
             foreach (var v in views)
             {
                 Quote q;
-                // 너무 오래 못 받았으면 값이 있어도 없는 것으로 친다 (IsDead 주석 참고)
-                bool ok = _quotes.TryGetValue(v.Def.Key, out q) && q.Ok && !IsDead;
+                _quotes.TryGetValue(v.Def.Key, out q);
+                bool ok = !QuoteDead(q);
+                bool stale = QuoteStale(q);
+                SetBrush(v.Price, stale ? Palette.Stale : Palette.Text);
+                v.Price.ToolTip = QuoteStatus(q);
 
                 bool isCurrent = v.Def.Key == curKey;
                 SetBrush(v.Name, isCurrent ? Palette.Text : Palette.TextDim);
@@ -7932,6 +7990,7 @@ namespace DeskWidget
                 SetText(v.Price, q.Price);
                 SetText(v.Ratio, (q.Ratio ?? "") + (q.RatioSuffix ?? ""));
                 SetBrush(v.Ratio, string.IsNullOrEmpty(q.RatioSuffix) ? Palette.TextDim : Palette.ForDir(q.Dir));
+                if (stale) SetBrush(v.Ratio, Palette.Stale);
             }
         }
 
@@ -8223,8 +8282,6 @@ namespace DeskWidget
                 // 다만 실패 뒤에는 짧게 되돌아온다 - RetryStamp 참고.
                 _failStreak = anyOk ? 0 : _failStreak + 1;
                 _lastQuoteAt = RetryStamp(DateTime.UtcNow, anyOk, _failStreak, _cfg.QuoteIntervalSec);
-                _lastFetchOk = anyOk;
-                if (anyOk) _lastQuoteOkAt = DateTime.UtcNow;
 
                 // 붙어 있으면 카드는 화면에 없다. 거기까지 다시 그릴 이유가 없다.
                 // (1초 주기에서 이 한 줄이 가장 크게 아낀다)

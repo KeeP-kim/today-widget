@@ -21,6 +21,7 @@
 $ErrorActionPreference = 'Stop'
 
 $src = Split-Path -Parent $MyInvocation.MyCommand.Definition
+. (Join-Path $src 'safety.ps1')
 
 # 이 설치가 놓는 것 전부. 차단 해제도 청소도 이 목록 안에서만 한다.
 $OurFiles = @('Onuln.exe', 'Onuln.dll', 'launch.ps1', 'launch.vbs',
@@ -116,11 +117,14 @@ function Test-Writable([string]$p) {
 # 이름만 보고 지우면 남이 같은 이름으로 둔 파일을 없앤다.
 function Test-OurFolder([string]$p) {
     if (-not (Test-Path -LiteralPath $p)) { return $false }
-    $marks = 0
-    foreach ($f in @('launch.vbs', 'launch.ps1', 'Onuln.exe', '오늘은.exe', 'config.json')) {
-        if (Test-Path -LiteralPath (Join-Path $p $f)) { $marks++ }
+    foreach ($f in @('Onuln.exe', 'Onuln.dll', '오늘은.exe', '오늘은.dll')) {
+        try {
+            $path = Assert-OnulnContainedPath $p (Join-Path $p $f)
+            if ((Test-Path -LiteralPath $path -PathType Leaf) -and
+                [Diagnostics.FileVersionInfo]::GetVersionInfo($path).ProductName -eq '오늘은') { return $true }
+        } catch { }
     }
-    return ($marks -ge 2)
+    return $false
 }
 
 # 이 폴더에 우리 것 말고 다른 파일이 있나. 마지막 '지우는 법' 안내가 이것으로 갈린다.
@@ -129,6 +133,7 @@ function Test-Dedicated([string]$p) {
         $ours = @{}
         foreach ($f in $OurFiles) { $ours[[System.IO.Path]::GetFileName($f)] = $true }
         $ours['설치안내.txt'] = $true; $ours['install.cmd'] = $true; $ours['install.ps1'] = $true
+        $ours['safety.ps1'] = $true
         foreach ($item in (Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue)) {
             if ($item.PSIsContainer) {
                 if ($item.Name -ne 'assets' -and $item.Name -ne '앱저장') { return $false }
@@ -198,6 +203,9 @@ if ([string]::IsNullOrWhiteSpace($ans)) {
     }
 }
 
+# Capture ownership before probes, copying, or new launcher files can create the markers.
+$destinationWasOurs = Test-OurFolder $dst
+Assert-OnulnContainedPath $dst $dst | Out-Null
 if (-not (Test-Writable $dst)) {
     Write-Host ''
     Write-Host '  [중단] 이 폴더에는 쓸 수가 없습니다.' -ForegroundColor Red
@@ -226,24 +234,7 @@ if ($inTemp -and $inPlace) {
 #   예전에는 명령줄에 'launch.ps1' 이 들어간 powershell 을 전부 죽였다.
 #   남의 launch.ps1 이나 relaunch.ps1 까지 말없이 잡는다 - 배포 스크립트가
 #   반쯤 돌다 끊길 수 있다. 우리 두 폴더의 launch.ps1 만 고른다.
-$mine = @()
-foreach ($d in @($srcFull, $dst)) { $mine += (Join-Path $d 'launch.ps1') }
-
-Get-Process 'Onuln', '오늘은' -ErrorAction SilentlyContinue | ForEach-Object {
-    try { $_.CloseMainWindow() | Out-Null; Start-Sleep -Milliseconds 200 } catch { }
-    try { $_.Kill() } catch { }
-}
-try {
-    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop |
-        Where-Object {
-            $c = $_.CommandLine
-            if ($_.ProcessId -eq $PID -or [string]::IsNullOrEmpty($c)) { return $false }
-            foreach ($m in $mine) { if ($c -like ('*' + $m + '*')) { return $true } }
-            return $false
-        } |
-        ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch { } }
-} catch { }
-Start-Sleep -Milliseconds 400
+Prepare-OnulnInstall $srcFull $dst $destinationWasOurs
 
 # ---------- 3) 복사 (그 자리에 두면 건너뛴다) ----------
 $existed = Test-Path -LiteralPath (Join-Path $dst 'Onuln.exe')
@@ -263,15 +254,7 @@ if ($inPlace) {
 
     # 옛 한글 이름 산출물 청소. **예전 설치 폴더가 확실할 때만** 한다 -
     # 이름만 보고 지우면 남이 같은 이름으로 둔 파일을 없앤다. 지운 것은 말해 준다.
-    if (Test-OurFolder $dst) {
-        foreach ($old in @('오늘은.exe', '오늘은.dll')) {
-            $p = Join-Path $dst $old
-            if (Test-Path -LiteralPath $p) {
-                try { Remove-Item -LiteralPath $p -Force; Write-Host "  옛 파일 정리     : $old 지움" }
-                catch { }
-            }
-        }
-    }
+    Remove-OnulnLegacyFiles $dst $destinationWasOurs
 }
 
 # 설정 파일은 이미 있으면 건드리지 않는다 (다시 깔아도 종목/위치가 남게)
@@ -290,7 +273,9 @@ if ($inPlace) {
         Write-Host '  설정 파일        : 이미 있던 것을 그대로 둡니다'
     }
 } elseif (Test-Path -LiteralPath $cfgSrc) {
-    Copy-Item -LiteralPath $cfgSrc -Destination $cfgDst -Force
+    Assert-OnulnContainedPath $srcFull $cfgSrc | Out-Null
+    Assert-OnulnContainedPath $dst $cfgDst | Out-Null
+    [IO.File]::Copy($cfgSrc, $cfgDst, $false)
     Write-Host '  설정 파일        : 새로 만듦'
 } else {
     Write-Host '  설정 파일        : 없음 - 위젯이 첫 실행 때 만듭니다'

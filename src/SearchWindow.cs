@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -16,12 +17,14 @@ namespace DeskWidget
         private readonly Action<SymbolDef> _onPick;
         private readonly HashSet<string> _already;
         private readonly bool _weatherOnly;
+        private readonly Func<string, CancellationToken, Task<List<SearchHit>>> _search;
 
         private TextBox _input;
         private StackPanel _results;
         private TextBlock _status;
         private DispatcherTimer _debounce;
         private CancellationTokenSource _cts;
+        private int _searchVersion;
         /// <summary>창이 닫혔다. 기다리던 응답이 늦게 와도 여기서 멈춘다.</summary>
         private bool _gone;
 
@@ -46,9 +49,14 @@ namespace DeskWidget
         }
 
         private SearchWindow(IEnumerable<SymbolDef> current, Action<SymbolDef> onPick, bool weatherOnly)
+            : this(current, onPick, weatherOnly, null) { }
+
+        internal SearchWindow(IEnumerable<SymbolDef> current, Action<SymbolDef> onPick, bool weatherOnly,
+                              Func<string, CancellationToken, Task<List<SearchHit>>> search)
         {
             _onPick = onPick;
             _weatherOnly = weatherOnly;
+            _search = search;
             _already = new HashSet<string>(StringComparer.Ordinal);
             if (current != null) foreach (var d in current) _already.Add(d.Key);
 
@@ -73,7 +81,7 @@ namespace DeskWidget
                 //   한참 뒤에 응답이 오면 닫힌 창이 본 창에 지역을 넣었다.
                 _gone = true;
                 if (_debounce != null) _debounce.Stop();
-                if (_cts != null) { try { _cts.Cancel(); } catch { } }
+                CancelSearch();
             };
 
             Content = BuildUi();
@@ -180,6 +188,11 @@ namespace DeskWidget
 
         private void Schedule()
         {
+            CancelSearch();
+            _results.Children.Clear();
+            _status.Text = "";
+            if (_debounce != null) _debounce.Stop();
+            if (_gone || _input.Text.Trim().Length == 0) return;
             if (_debounce == null)
             {
                 _debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(280) };
@@ -191,6 +204,8 @@ namespace DeskWidget
 
         private async void Run()
         {
+            if (_gone) return;
+            CancelSearch();
             string q = _input.Text.Trim();
             if (q.Length == 0)
             {
@@ -199,26 +214,32 @@ namespace DeskWidget
                 return;
             }
 
-            if (_cts != null) { try { _cts.Cancel(); } catch { } }
-            _cts = new CancellationTokenSource();
-            var ct = _cts.Token;
+            var request = new CancellationTokenSource();
+            _cts = request;
+            var ct = request.Token;
+            int version = _searchVersion;
 
             _status.Text = "찾는 중...";
             List<SearchHit> hits = null;
             try
             {
-                hits = _weatherOnly
+                hits = _search != null ? await _search(q, ct) : _weatherOnly
                      ? await Sources.SearchWeatherAreasAsync(q, ct)
                      : await Sources.SearchAsync(q, ct);
                 // 종목 검색에는 날씨가 섞이지 않는다. 지금은 출처가 갈려 있어 섞일 일이 없지만,
                 // 나중에 자동완성이 지역명을 내주기 시작해도 여기서 걸린다.
-                if (hits != null && !_weatherOnly)
-                    hits = hits.Where(h => h.Def == null || h.Def.Kind != SourceKind.Weather).ToList();
+                if (hits != null)
+                    hits = hits.Where(h => h != null && h.Def != null && (_weatherOnly || h.Def.Kind != SourceKind.Weather)).ToList();
             }
             catch (OperationCanceledException) { return; }
             catch { }
+            finally
+            {
+                if (ReferenceEquals(_cts, request)) _cts = null;
+                request.Dispose();
+            }
 
-            if (ct.IsCancellationRequested) return;
+            if (_gone || ct.IsCancellationRequested || version != _searchVersion || q != _input.Text.Trim()) return;
 
             _results.Children.Clear();
             if (hits == null || hits.Count == 0)
@@ -231,9 +252,18 @@ namespace DeskWidget
             foreach (var h in hits) _results.Children.Add(BuildHit(h));
         }
 
+        private void CancelSearch()
+        {
+            _searchVersion++;
+            var request = _cts;
+            _cts = null;
+            if (request != null) { try { request.Cancel(); } catch (ObjectDisposedException) { } }
+        }
+
         private UIElement BuildHit(SearchHit hit)
         {
             bool dup = _already.Contains(hit.Def.Key);
+            int version = _searchVersion;
 
             var g = new Grid();
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -277,6 +307,7 @@ namespace DeskWidget
                 row.MouseLeftButtonDown += async (s, e) =>
                 {
                     e.Handled = true;
+                    if (_gone || version != _searchVersion) return;
 
                     // 날씨는 좌표가 있어야 조회할 수 있다. 고른 시점에 한 번만 구한다.
                     if (hit.Def.Kind == SourceKind.Weather)
@@ -285,7 +316,7 @@ namespace DeskWidget
                         bool ok = false;
                         try { ok = await Sources.ResolveCoordsAsync(hit.Def, hit.TypeName, CancellationToken.None); }
                         catch { }
-                        if (_gone) return;
+                        if (_gone || version != _searchVersion) return;
                         if (!ok) { _status.Text = "이 지역의 위치를 찾지 못했습니다"; return; }
                     }
 

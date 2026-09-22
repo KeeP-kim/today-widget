@@ -45,15 +45,25 @@ namespace DeskWidget
                 if (suite == "calibration-live") checks += DeepPredictionTests.Live(work);
                 if (suite == "all" || suite == "surge") checks += SurgeTests.Run(work);
                 if (suite == "all" || suite == "deep") checks += DeepPredictionTests.Run(work);
-                if (suite == "journal") checks += PredictionJournalTests.Run(work);
+                if (suite == "all" || suite == "journal")
+                {
+                    string journalWork = Path.Combine(work, "journal-suite");
+                    Directory.CreateDirectory(journalWork);
+                    Program.BaseDir = journalWork;
+                    try { checks += PredictionJournalTests.Run(journalWork); }
+                    finally { Program.BaseDir = work; }
+                }
+                if (suite == "all" || suite == "data-freshness") checks += DataFreshnessTests.Run(work);
+                if (suite == "all" || suite == "quote-freshness") checks += QuoteFreshnessTests.Run(work);
+                if (suite == "all" || suite == "persistence") checks += PersistenceTests.Run(work);
                 if (suite == "all" || suite == "json") { JsonAndConfig(root, work); AuditFixes(work); }
                 if (suite == "all" || suite == "ui") CollapsedQuotes(work);
                 if (suite == "all" || suite == "docs") { Readme(root); BuildSources(root); DocCounts(root); SlowLaneWiring(root); TradedDateWiring(root); WeatherSearchWiring(root); ModeNaming(root); }
                 if (suite == "all" || suite == "dollar") checks += DollarAnalysisTests.Run(work);
                 if (suite == "dollar-live") checks += DollarAnalysisTests.Live(work);
                 if (suite == "astra-live") checks += DollarSparkTests.Live(work, "gpt-6-astra");
-                if (suite == "spark-live") checks += DollarSparkTests.Live(work);
-                if (suite == "spark-doge-live") checks += DollarSparkTests.LiveDoge(work);
+                if (suite == "luna-live" || suite == "spark-live") checks += DollarSparkTests.Live(work);
+                if (suite == "luna-doge-live" || suite == "spark-doge-live") checks += DollarSparkTests.LiveDoge(work);
                 if (suite == "dollar-layout") checks += DollarLayoutTests.Run(work, true);
                 if (suite == "prediction-layout") checks += PredictionTests.Run(work, true);
                 if (suite == "prediction-live") checks += PredictionTests.Live(root);

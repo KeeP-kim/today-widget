@@ -150,7 +150,7 @@ namespace DeskWidget
                 "Astra effort label overlaps timer");
             if (preview) Save(body, work, "astra-high-340.png", 340, 820);
             window.ChangeModel(DollarSpark.Model);
-            Check(modelLabel.Text == "Spark · High ▾", "Spark effort lost after swap");
+            Check(modelLabel.Text == "Luna · High ▾", "Luna effort lost after swap");
             Field<Button>(window, "_sparkLogin").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Check(!Field<bool>(window, "_sparkConnected") && !Field<DispatcherTimer>(window, "_sparkTimer").IsEnabled && loggedIn, "disconnect kept automatic analysis or logged out global CLI");
             window.Close();

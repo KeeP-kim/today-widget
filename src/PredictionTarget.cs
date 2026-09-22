@@ -95,6 +95,28 @@ namespace DeskWidget
             return Regex.IsMatch(root, "[A-Za-z]{2,}") ? root : "";
         }
 
+        internal static string CoinEnglishName(string code)
+        {
+            switch (code)
+            {
+                case "KRW-BTC": return "Bitcoin";
+                case "KRW-ETH": return "Ethereum";
+                case "KRW-DOGE": return "Dogecoin";
+                default: return "";
+            }
+        }
+
+        internal static string CoinKoreanName(string code)
+        {
+            switch (code)
+            {
+                case "KRW-BTC": return "비트코인";
+                case "KRW-ETH": return "이더리움";
+                case "KRW-DOGE": return "도지코인";
+                default: return "";
+            }
+        }
+
         internal string SearchName
         {
             get
@@ -110,7 +132,12 @@ namespace DeskWidget
                 }
                 if (Economic && Def.Code == "INTL:US") return "연준 OR FOMC OR Federal Reserve";
                 if (Economic && Def.Code == "INTL:KR") return "한국은행 OR 한은 OR Bank of Korea";
-                if (Def.Kind == SourceKind.Coin) return "\"" + Name + "\" OR \"" + Def.Code.Replace("KRW-", "") + "\"";
+                if (Def.Kind == SourceKind.Coin)
+                {
+                    string english = CoinEnglishName(Def.Code);
+                    return "\"" + Name.Replace("\"", "") + "\" OR \"" + Def.Code.Replace("KRW-", "") + "\"" +
+                        (english.Length > 0 ? " OR \"" + english + "\"" : "");
+                }
                 return "\"" + Name.Replace("\"", "") + "\"";
             }
         }

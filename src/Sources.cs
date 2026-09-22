@@ -104,6 +104,10 @@ namespace DeskWidget
         public string Unit;
         public string IdentityKey;
         public DateTime ReceivedUtc;
+        // Exchange timestamps and local receipt are separate clocks. Required for real Upbit quotes.
+        public bool ProviderTimeRequired;
+        public DateTime ProviderUtc;
+        public DateTime TradedUtc;
         public bool MarketClosed;
         /// <summary>
         /// 이 값이 실제로 거래된(고시된) 날. 모르면 MinValue.
@@ -128,6 +132,8 @@ namespace DeskWidget
         public string City;
     }
 
+    internal enum QuoteFreshness { Fresh, Unavailable, Stale, Future, Invalid }
+
     /// <summary>종목 검색 결과 한 건.</summary>
     internal sealed class SearchHit
     {
@@ -137,6 +143,32 @@ namespace DeskWidget
 
     internal static class Sources
     {
+        internal static readonly TimeSpan QuoteMaxAge = TimeSpan.FromMinutes(5);
+        internal static readonly TimeSpan ProviderClockSkew = TimeSpan.FromSeconds(30);
+        internal static QuoteFreshness ProviderFreshness(Quote quote, DateTime now)
+        {
+            if (quote == null || quote.ProviderUtc == DateTime.MinValue || quote.TradedUtc == DateTime.MinValue)
+                return QuoteFreshness.Invalid;
+            if (quote.ProviderUtc - now > ProviderClockSkew || quote.TradedUtc - now > ProviderClockSkew ||
+                quote.ProviderUtc - quote.ReceivedUtc > ProviderClockSkew || quote.TradedUtc - quote.ReceivedUtc > ProviderClockSkew)
+                return QuoteFreshness.Future;
+            if (quote.TradedUtc - quote.ProviderUtc > ProviderClockSkew) return QuoteFreshness.Invalid;
+            if (now - quote.ProviderUtc > QuoteMaxAge || now - quote.TradedUtc > QuoteMaxAge)
+                return QuoteFreshness.Stale;
+            return QuoteFreshness.Fresh;
+        }
+        internal static QuoteFreshness QuoteFreshnessOf(Quote quote, DateTime now)
+        {
+            if (quote == null || !quote.Ok) return QuoteFreshness.Unavailable;
+            if (quote.ReceivedUtc == DateTime.MinValue) return QuoteFreshness.Invalid;
+            if (quote.ReceivedUtc > now) return QuoteFreshness.Future;
+            if (now - quote.ReceivedUtc > QuoteMaxAge) return QuoteFreshness.Stale;
+            if (quote.TradedDate != DateTime.MinValue && quote.TradedDate != DollarAnalysis.KoreaDate(now))
+                return QuoteFreshness.Stale;
+            return quote.ProviderTimeRequired ? ProviderFreshness(quote, now) : QuoteFreshness.Fresh;
+        }
+        internal static bool IsQuoteFresh(Quote quote, DateTime now)
+        { return QuoteFreshnessOf(quote, now) == QuoteFreshness.Fresh; }
         private static readonly object QuoteGate = new object();
         private static readonly Dictionary<string, Quote> SharedQuotes = new Dictionary<string, Quote>();
         internal static event Action<string, Quote> QuoteUpdated;
@@ -172,7 +204,7 @@ namespace DeskWidget
         {
             ct.ThrowIfCancellationRequested();
             var shared = SharedQuote(def, bank);
-            if (shared != null && (DateTime.UtcNow - shared.ReceivedUtc).TotalSeconds <= 30) return shared;
+            if (shared != null && (DateTime.UtcNow - shared.ReceivedUtc).TotalSeconds <= 30 && IsQuoteFresh(shared, DateTime.UtcNow)) return shared;
             return await FetchAsync(def, bank, ct).ConfigureAwait(false);
         }
         /// <summary>첫 실행 때 채워 넣는 기본 종목.</summary>
@@ -474,9 +506,15 @@ namespace DeskWidget
         {
             string url = "https://api.upbit.com/v1/ticker?markets=" + def.Code;
             var j = await Net.GetJsonAsync(url, ct).ConfigureAwait(false);
+            return ParseUpbit(def, j);
+        }
+
+        internal static Quote ParseUpbit(SymbolDef def, JNode j)
+        {
             var t = j[0];
             double price = t["trade_price"].D;
-            if (double.IsNaN(price)) return new Quote();
+            if (def == null || t["market"].S != def.Code || double.IsNaN(price) || double.IsInfinity(price) || price <= 0)
+                return new Quote();
 
             double diff = t["signed_change_price"].D;
             double rate = t["signed_change_rate"].D * 100.0;   // 비율 → %
@@ -492,13 +530,29 @@ namespace DeskWidget
                 //   시바이누·페페 같은 것은 0.0xx 원대라 화면에 값도 등락폭도 남지 않았다.
                 Price = price.ToString("N" + CoinDigits(price), CultureInfo.InvariantCulture),
                 Value = price, Unit = "원",
+                ProviderTimeRequired = true,
+                ProviderUtc = UnixMilliseconds(t["timestamp"].D),
+                TradedUtc = UnixMilliseconds(t["trade_timestamp"].D),
                 Dir = chg == "RISE" ? 1 : (chg == "FALL" ? -1 : 0),
                 Diff = FormatAbs(diff, CoinDigits(price)),
                 Ratio = FormatSigned(rate, 2),
-                Time = DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture),
+                Time = UpbitTime(t["trade_timestamp"].D),
                 Source = "업비트",
                 Link = "https://stock.naver.com/crypto/UPBIT/" + ticker + "/price",
             };
+        }
+
+        private static DateTime UnixMilliseconds(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value) || value <= 0 || value != Math.Truncate(value))
+                return DateTime.MinValue;
+            try { return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(value); }
+            catch (ArgumentOutOfRangeException) { return DateTime.MinValue; }
+        }
+        private static string UpbitTime(double value)
+        {
+            DateTime time = UnixMilliseconds(value);
+            return time == DateTime.MinValue ? "시각 확인 불가" : time.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture);
         }
 
         // ---------- 종목 검색 ----------

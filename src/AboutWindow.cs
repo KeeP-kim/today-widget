@@ -324,10 +324,17 @@ namespace DeskWidget
         private void SaveKey()
         {
             if (_keyBox == null || _cfg == null) return;
+            string previousKey = _cfg.EcosKey;
             try
             {
                 _cfg.SetEcosKey(_keyBox.Text);
-                _cfg.Save();
+                if (!_cfg.Save())
+                {
+                    _cfg.SetEcosKey(previousKey);
+                    _keyNote.Text = "저장하지 못했습니다. 파일 잠금이나 폴더 쓰기 권한을 확인한 뒤 다시 시도해 주세요.";
+                    _keyNote.Foreground = Palette.Stale;
+                    return;
+                }
                 _keyBox.Text = _cfg.EcosKey ?? "";
 
                 bool has = !string.IsNullOrEmpty(_cfg.EcosKey);

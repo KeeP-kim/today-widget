@@ -65,7 +65,7 @@ namespace DeskWidget
                 mode.IsChecked = true; w.Render(r);
                 Check(primary.Children.Contains(forecasts) && !comparisonBody.Children.Contains(forecasts),
                     "AI and basic exposed as two equal main forecasts");
-                Check(Field<TextBlock>(w, "_primaryStatus").Text.Contains("AI 주전망 · Spark"), "main forecast model is unclear");
+                Check(Field<TextBlock>(w, "_primaryStatus").Text.Contains("AI 주전망 · Luna"), "main forecast model is unclear");
                 Check(Field<BriefTextBlock>(w, "_comparisonSummary").Text.Contains("같은 입력 자료") && Field<BriefTextBlock>(w, "_comparisonSummary").Text.Contains("월간"),
                     "same-input basic comparison missing");
                 var directions = Field<TextBlock[]>(w, "_periodDirections");

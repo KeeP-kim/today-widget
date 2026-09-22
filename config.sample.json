@@ -1,5 +1,6 @@
 {
-  "version": "1.047",
+  "version": "1.050",
+  "analysisModel": "gpt-5.6-luna",
   "sparkRefreshIntervalSec": 0,
 
   "//ecosKey": "한국은행 ECOS 오픈API 인증키. ecos.bok.or.kr → 오픈API 에서 무료 발급. 금리·물가 항목을 쓸 때만 필요하고, 비워두면 나머지는 그대로 동작한다.",

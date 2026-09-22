@@ -55,11 +55,31 @@ namespace DeskWidget
         /// </summary>
         internal static bool Fresh(Quote q, DateTime now)
         {
+            return LegacyFresh(q, now) && (!CoinIdentity(q.IdentityKey) || Sources.ProviderFreshness(q, now) == QuoteFreshness.Fresh);
+        }
+        private static bool LegacyFresh(Quote q, DateTime now)
+        {
             if (q == null || !q.Ok || q.MarketClosed || q.Time == "장마감" || string.IsNullOrEmpty(q.IdentityKey)) return false;
             if (!Finite(PredictionTarget.Number(q)) || PredictionTarget.Number(q) <= 0) return false;
             if (q.ReceivedUtc > now || (now - q.ReceivedUtc).TotalMinutes > 5) return false;
             if (q.TradedDate != DateTime.MinValue && q.TradedDate != DollarAnalysis.KoreaDate(now)) return false;
             return true;
+        }
+        private static bool CoinIdentity(string identity)
+        { return identity != null && identity.StartsWith("coin:", StringComparison.Ordinal); }
+        private static bool ProviderTimeEra(XmlElement root)
+        {
+            decimal version;
+            return CoinIdentity(root.GetAttribute("identity")) &&
+                decimal.TryParse(root.GetAttribute("version"), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out version) && version >= 1.050m;
+        }
+        private static bool SavedProviderTimes(XmlElement element, string prefix, DateTime received, DateTime now, DateTime due)
+        {
+            if (received > now || now - received > Sources.QuoteMaxAge) return false;
+            var quote = new Quote { ReceivedUtc = received,
+                ProviderUtc = T(element, prefix.Length == 0 ? "providerUtc" : prefix + "ProviderUtc"),
+                TradedUtc = T(element, prefix.Length == 0 ? "tradedUtc" : prefix + "TradedUtc") };
+            return Sources.ProviderFreshness(quote, now) == QuoteFreshness.Fresh && quote.TradedUtc >= due;
         }
         /// <summary>
         /// 이 기록이 그 품목·그 피드의 것인가. 문서를 통째로 올리기 전에 뿌리 속성만 본다.
@@ -134,12 +154,23 @@ namespace DeskWidget
                 root.SetAttribute("identity", r.Quote.IdentityKey); root.SetAttribute("source", r.Quote.Source ?? "");
                 root.SetAttribute("unit", r.Target.Unit(r.Quote)); root.SetAttribute("anchor", S(PredictionTarget.Number(r.Quote)));
                 root.SetAttribute("quoteReceived", r.Quote.ReceivedUtc.ToString("o"));
-                root.SetAttribute("evaluation", "coin: calendar 1/7/30; others: weekdays 1/5/20, holidays not adjusted; first same-feed receipt within 6h; receipt time is not exchange time");
+                if (CoinIdentity(r.Quote.IdentityKey)) {
+                    root.SetAttribute("quoteProviderUtc", r.Quote.ProviderUtc.ToString("o"));
+                    root.SetAttribute("quoteTradedUtc", r.Quote.TradedUtc.ToString("o"));
+                    root.SetAttribute("timePolicy", "upbit-trade-v1");
+                }
+                root.SetAttribute("evaluation", "coin: calendar 1/7/30; others: weekdays 1/5/20, holidays not adjusted; first same-feed receipt within 6h; coin provider/trade age <=5m, future skew <=30s, trade >= due");
                 // 신뢰도를 되살릴 입력값. 이게 없어서 저장 점수를 XML 만으로 재현할 수 없었다
                 // (감사 실측: 피드 9/11 을 가정해야 소수점까지 맞았다).
                 root.SetAttribute("domestic", r.DomesticAvailable ? "1" : "0");
                 root.SetAttribute("global", r.GlobalAvailable ? "1" : "0");
                 root.SetAttribute("topicFeeds", r.TopicFeedsAvailable.ToString(CultureInfo.InvariantCulture) + "/" + r.TopicFeedsExpected.ToString(CultureInfo.InvariantCulture));
+                if (r.Spark != null && !string.IsNullOrEmpty(r.Spark.MarketSnapshot)) {
+                    var input = doc.CreateElement("aiMarketInput");
+                    input.SetAttribute("model", DollarSpark.ModelId(r.Spark.ModelId));
+                    input.SetAttribute("submittedUtc", r.Spark.CheckedUtc.ToString("o"));
+                    input.InnerText = r.Spark.MarketSnapshot; root.AppendChild(input);
+                }
                 foreach (var news in r.News.Where(n => n.PublishedUtc <= now)) {
                     var e = doc.CreateElement("article"); e.SetAttribute("url", news.Url ?? ""); e.SetAttribute("published", news.PublishedUtc.ToString("o"));
                     e.SetAttribute("source", news.Source ?? "");
@@ -227,7 +258,8 @@ namespace DeskWidget
         }
         internal static void Observe(Quote q, DateTime now)
         {
-            if (!Fresh(q, now) || !Directory.Exists(Folder)) return;
+            // Old predictions retain their receipt-time rule; only new coin records require exchange clocks.
+            if (!LegacyFresh(q, now) || !Directory.Exists(Folder)) return;
             lock (Gate) foreach (string path in Directory.GetFiles(Folder, "*.xml")) {
                 if (path.EndsWith(".score.xml", StringComparison.Ordinal)) continue;
                 // 채점 창은 아무리 길어도 만기(최대 45일) + 6시간이다. 그보다 오래된 파일은
@@ -238,6 +270,8 @@ namespace DeskWidget
                 if (!HeaderMatches(path, q.IdentityKey, q.Source)) continue;
                 var document = Read(path); if (document == null) continue; var root = document.DocumentElement;
                 if (!ValidRecord(root)) continue;
+                bool providerTime = ProviderTimeEra(root);
+                if (providerTime && !Fresh(q, now)) continue;
                 foreach (XmlElement f in root.SelectNodes("forecast")) {
                     // ★ 한 건이 넘어져도 나머지는 채점해야 한다 ★
                     //   전에는 기록 하나의 속성이 망가지면 예외가 Observe 밖으로 나가
@@ -247,6 +281,7 @@ namespace DeskWidget
                     DateTime due = T(f, "due");
                     string output = path + "." + f.GetAttribute("model") + "." + f.GetAttribute("horizon") + ".score.xml";
                     if (File.Exists(output) || q.ReceivedUtc < due || q.ReceivedUtc > due.AddHours(6)) continue;
+                    if (providerTime && q.TradedUtc < due) continue;
                     double anchor = N(root, "anchor"), predicted = N(f, "value"), actual = PredictionTarget.Number(q);
                     var doc = new XmlDocument(); var score = doc.CreateElement("score"); doc.AppendChild(score);
                     score.SetAttribute("schema", "2"); score.SetAttribute("source", q.Source ?? ""); score.SetAttribute("version", root.GetAttribute("version"));
@@ -255,6 +290,12 @@ namespace DeskWidget
                     score.SetAttribute("identity", q.IdentityKey); score.SetAttribute("model", f.GetAttribute("model"));
                     score.SetAttribute("horizon", f.GetAttribute("horizon")); score.SetAttribute("actual", S(actual));
                     score.SetAttribute("received", q.ReceivedUtc.ToString("o"));
+                    if (providerTime) {
+                        score.SetAttribute("providerUtc", q.ProviderUtc.ToString("o"));
+                        score.SetAttribute("tradedUtc", q.TradedUtc.ToString("o"));
+                        score.SetAttribute("observedUtc", now.ToString("o"));
+                        score.SetAttribute("timePolicy", "upbit-trade-v1");
+                    }
                     score.SetAttribute("error", S(Math.Abs(predicted - actual) / anchor * 100));
                     score.SetAttribute("baselineError", S(Math.Abs(anchor - actual) / anchor * 100));
                     double band = StoredThreshold(f, int.Parse(f.GetAttribute("horizon"), CultureInfo.InvariantCulture));
@@ -305,10 +346,12 @@ namespace DeskWidget
                 if (root == null || root.Name != "prediction" || (schema != "2" && schema != "3")) return false;
                 double anchor = N(root, "anchor"); if (!Finite(anchor) || anchor <= 0) return false;
                 DateTime created = T(root, "created");
+                if (ProviderTimeEra(root) && (root.GetAttribute("timePolicy") != "upbit-trade-v1" ||
+                    !SavedProviderTimes(root, "quote", T(root, "quoteReceived"), created, DateTime.MinValue))) return false;
                 var seen = new HashSet<string>();
                 foreach (XmlElement f in root.SelectNodes("forecast")) {
                     string model = f.GetAttribute("model"), h = f.GetAttribute("horizon");
-                    if (!new[] { "basic", "extreme-rule", DollarSpark.Model, "gpt-6-astra" }.Contains(model) || !new[] { "1", "5", "20" }.Contains(h) || !seen.Add(model + h)) return false;
+                    if (!new[] { "basic", "extreme-rule", DollarSpark.LegacyModel, DollarSpark.Model, "gpt-6-astra" }.Contains(model) || !new[] { "1", "5", "20" }.Contains(h) || !seen.Add(model + h)) return false;
                     if (!Finite(N(f, "value")) || N(f, "value") <= 0 || T(f, "due") <= created || T(f, "due") > created.AddDays(45)) return false;
                 }
                 return seen.Count > 0;
@@ -447,6 +490,11 @@ namespace DeskWidget
                     e.GetAttribute("version") != root.GetAttribute("version") || e.GetAttribute("model") != forecast.GetAttribute("model") || e.GetAttribute("horizon") != forecast.GetAttribute("horizon") || e.GetAttribute("created") != root.GetAttribute("created")) return null;
                 double actual = N(e, "actual"), anchor = N(root, "anchor"), prediction = N(forecast, "value"); int h = int.Parse(forecast.GetAttribute("horizon"));
                 if (!Finite(actual) || actual <= 0 || T(e, "received") < T(forecast, "due") || T(e, "received") > T(forecast, "due").AddHours(6)) return null;
+                if (ProviderTimeEra(root)) {
+                    DateTime received = T(e, "received"), observed = T(e, "observedUtc");
+                    if (e.GetAttribute("timePolicy") != "upbit-trade-v1" || observed < received || observed - received > Sources.QuoteMaxAge ||
+                        !SavedProviderTimes(e, "", received, observed, T(forecast, "due"))) return null;
+                }
                 // Derive metrics from immutable forecast and outcome, never trust stored score percentages.
                 e.SetAttribute("error", S(Math.Abs(prediction - actual) / anchor * 100)); e.SetAttribute("baselineError", S(Math.Abs(anchor - actual) / anchor * 100));
                 double band = StoredThreshold(forecast, h);

@@ -25,6 +25,7 @@ namespace DeskWidget
             count = 0;
             count += DollarSparkTests.Run(work);
             count += DollarLayoutTests.Run(work);
+            count += PredictionAuditTests.Run(work);
             FactorChecks();
             DateTime today = new DateTime(2026, 9, 8);
             string row = "{\"date\":\"2026-09-07\",\"base\":\"USD\",\"quote\":\"KRW\",\"rate\":1350}";
@@ -554,7 +555,7 @@ namespace DeskWidget
                 new[] { "스테이블코인 공급량 급증", "stablecoin-supply:+" },
                 new[] { "스테이블코인 공급량 급감", "stablecoin-supply:-" },
                 new[] { "기관 투자자 비트코인 매수 확대", "institutional-adoption:+" },
-                new[] { "SEC delays decision on crypto ETF", "etf-approval:-" },
+                new[] { "SEC delays decision on Bitcoin ETF", "etf-approval:-" },
                 new[] { "SEC, 코인 거래소 기소", "crypto-regulation:-" },
                 new[] { "Regulators ban crypto trading for retail", "crypto-regulation:-" },
                 new[] { "코인 규제 완화 발표", "crypto-regulation:+" },

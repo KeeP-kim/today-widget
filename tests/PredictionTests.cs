@@ -36,7 +36,7 @@ namespace DeskWidget
             var us = Target(SourceKind.Ecos, "INTL:US", "미국 정책금리");
             var kr = Target(SourceKind.Ecos, "INTL:KR", "한국 기준금리");
             Check(dollar.Dollar && !tree.Dollar && !yen.Dollar && !en.Dollar, "target identity uses label instead of kind/code");
-            Check(Config.AppVersion == "1.047" && Config.IsNewer("1.048") && !Config.IsNewer("1.047") && !Config.IsNewer("1.020"), "thousandth version update not detected");
+            Check(Config.AppVersion == "1.050" && Config.IsNewer("1.051") && !Config.IsNewer("1.050") && !Config.IsNewer("1.020"), "thousandth version update not detected");
             Check(tree.Format(131.42, new Quote { Unit = "USD" }) == "$131.42", "world price formatted as won");
             Check(en.Format(1581, new Quote { Unit = "JPY" }).EndsWith("JPY") && Sources.WorldPrice("1,581.0", "JPY") == "1,581.0 JPY", "Japanese stock incorrectly marked dollars");
             Check(yen.Format(871.63, null) == "871.63원" && index.Format(2636.46, null).EndsWith("pt"), "yen 100 or index unit converted incorrectly");
@@ -75,6 +75,7 @@ namespace DeskWidget
             Check(DollarFactors.Analyze(News(us, "연준 금리 안 올린다")).All(f => f.Direction == 0), "negated policy becomes hike");
             Check(DollarFactors.Analyze(News(yen, "일본은행 금리 인상 결정")).Any(f => f.Direction > 0), "BOJ hike not linked to yen target");
             Check(DollarFactors.Analyze(News(tree, "달러 환율 상승 소식")).Count == 0, "Dollar Tree confused with dollar FX");
+            CoinAttributionChecks();
 
             var source = new DollarAnalysisResult { Target = us, Quote = new Quote { Ok = true, Price = "4.50 %", Unit = "%" }, CheckedUtc = DateTime.UtcNow };
             source.News.Add(News(us, "Federal Reserve raises interest rates"));
@@ -203,6 +204,48 @@ namespace DeskWidget
             Check(!widget.IsLoaded, "widget preview showed a native window"); widget.Close();
             return count;
         }
+        private static void CoinAttributionChecks()
+        {
+            var doge = Target(SourceKind.Coin, "KRW-DOGE", "도지코인");
+            var btc = Target(SourceKind.Coin, "KRW-BTC", "비트코인");
+            Check(doge.SearchName.Contains("\"Dogecoin\""), "Dogecoin full name missing from news search");
+            Check(PredictionFactors.Relevant("Dogecoin payment adoption expands", doge) &&
+                PredictionFactors.Subject("dogecoin payment adoption expands", doge), "English Dogecoin news discarded");
+            foreach (string unrelated in new[] { "DogecoinCash", "Dogecoins", "undogecoin", "Dogecoin2" })
+                Check(!PredictionFactors.Subject(unrelated, doge), "Dogecoin alias matches a longer name: " + unrelated);
+            Check(!PredictionFactors.Subject("DogecoinCash", Target(SourceKind.Coin, "KRW-DOGE", "Dogecoin")) &&
+                !PredictionFactors.Subject("KRW-DOGE2", doge), "display label or code bypasses coin name boundaries");
+            Func<PredictionTarget, string, string, bool> hasRule = (target, title, rule) =>
+                PredictionFactors.Analyze(News(target, title)).Any(f => f.Rule.EndsWith(":" + rule, StringComparison.Ordinal) && f.Direction != 0);
+            Check(hasRule(doge, "Dogecoin spot ETF posts inflows", "etf-flow"), "own Dogecoin ETF flow lost");
+            Check(hasRule(btc, "Bitcoin spot ETF posts inflows", "etf-flow"), "own Bitcoin ETF flow lost");
+            Check(!hasRule(doge, "Bitcoin spot ETF inflows support crypto market", "etf-flow"), "Bitcoin ETF assigned to DOGE");
+            Check(!hasRule(doge, "Dogecoin gains as Bitcoin spot ETF posts inflows", "etf-flow"), "mixed-coin ETF clause assigned to DOGE");
+            Check(!hasRule(doge, "SEC delays decision on crypto ETF", "etf-approval"), "unnamed ETF assigned to DOGE");
+            Check(hasRule(doge, "Dogecoin whale deposits to exchange", "whale-flow"), "own whale flow lost");
+            Check(!hasRule(doge, "Bitcoin whale deposits to exchange", "whale-flow"), "Bitcoin whale assigned to DOGE");
+            Check(!hasRule(doge, "Whale deposits to exchange", "whale-flow"), "unnamed whale assigned to DOGE");
+            Check(hasRule(btc, "Bitcoin halving arrives", "halving"), "own Bitcoin supply event lost");
+            Check(!hasRule(doge, "Bitcoin halving lifts crypto market", "halving"), "Bitcoin halving assigned to DOGE supply");
+            Check(hasRule(doge, "기관 투자자 도지코인 매수 확대", "institutional-adoption"), "own institutional buying lost");
+            Check(!hasRule(doge, "기관 투자자 비트코인 매수 확대", "institutional-adoption"), "Bitcoin institutional buying assigned to DOGE");
+            var mixed = News(doge, "Bitcoin market update"); mixed.Context = "ETF records inflows. Whale deposits to exchange.";
+            Check(!PredictionFactors.Analyze(mixed).Any(f => f.Rule.EndsWith(":etf-flow") || f.Rule.EndsWith(":whale-flow")),
+                "headline subject leaked into unrelated bare body events");
+            mixed = News(doge, "Dogecoin market update"); mixed.Context = "Bitcoin spot ETF posts inflows. Dogecoin whale deposits to exchange.";
+            var factors = PredictionFactors.Analyze(mixed);
+            Check(!factors.Any(f => f.Rule.EndsWith(":etf-flow")) && factors.Any(f => f.Rule.EndsWith(":whale-flow")),
+                "different asset clauses were merged");
+            Check(hasRule(doge, "Fed raises interest rates", "discount-rate") &&
+                hasRule(doge, "USDC 대량 소각", "stablecoin-supply"), "shared monetary context lost");
+            Check(hasRule(doge, "Exchange hack drains customer funds", "exchange-incident"), "market-wide exchange incident lost");
+            Check(hasRule(doge, "Dogecoin exploit drains funds", "exchange-incident") &&
+                !hasRule(doge, "Ethereum exploit drains funds", "exchange-incident") &&
+                !hasRule(doge, "Protocol exploit drains funds", "exchange-incident"), "network incident assigned without a clear target");
+            Check(PredictionFactors.Relevant("Bitcoin spot ETF inflows support crypto market", doge),
+                "other asset market context discarded instead of kept for interpretation");
+        }
+
         private static string Response(string key, double delta)
         {
             return "{\"target_key\":\"" + key + "\",\"style\":\"basic\",\"periods\":[" + string.Join(",", new[] { 1, 5, 20 }.Select(h =>

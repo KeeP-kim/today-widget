@@ -16,9 +16,8 @@ using System.Runtime.Versioning;
 [assembly: AssemblyProduct("오늘은")]
 [assembly: AssemblyDescription("환율 / 시세 / 날씨 데스크톱 위젯")]
 // Config.AppVersion 과 함께 올린다
-[assembly: AssemblyVersion("1.0.47.0")]
-[assembly: AssemblyFileVersion("1.0.47.0")]
-
+[assembly: AssemblyVersion("1.0.50.0")]
+[assembly: AssemblyFileVersion("1.0.50.0")]
 
 
 

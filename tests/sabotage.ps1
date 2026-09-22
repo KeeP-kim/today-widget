@@ -20,7 +20,7 @@ $cases = @(
     @{ Name='every release starts its own scoring era'; File='Config.cs'; Suite='json'; Old='if (rv > 0 && rv <= v) era = r;'; New='if (rv > 0 && rv <= v) era = version;' },
     @{ Name='weather opens a prediction window'; File='DollarAnalysisWindow.cs'; Suite='json'; Old='if (def == null || def.Kind == SourceKind.Weather) return;'; New='if (def == null) return;' },
     @{ Name='weather can be added to the quote list'; File='WidgetWindow.cs'; Suite='json'; Old='if (def == null || def.Kind == SourceKind.Weather) return;'; New='if (def == null) return;' },
-    @{ Name='quote search stops filtering weather'; File='SearchWindow.cs'; Suite='docs'; Old='hits = hits.Where(h => h.Def == null || h.Def.Kind != SourceKind.Weather).ToList();'; New='hits = hits.ToList();' },
+    @{ Name='quote search stops filtering weather'; File='SearchWindow.cs'; Suite='docs'; Old='hits = hits.Where(h => h != null && h.Def != null && (_weatherOnly || h.Def.Kind != SourceKind.Weather)).ToList();'; New='hits = hits.Where(h => h != null && h.Def != null).ToList();' },
     @{ Name='side bar does not reserve room for favourites'; File='WidgetWindow.cs'; Suite='cli-side'; Old='return (vertical ? _dockApps.DesiredSize.Height : _dockApps.DesiredSize.Width) + 8;'; New='return vertical ? 0 : _dockApps.DesiredSize.Width + 8;' },
     @{ Name='side bar section order ignored'; File='WidgetWindow.cs'; Suite='cli-side'; Old='? new UIElement[] { _dockApps, _dockClip }'; New='? new UIElement[] { _dockClip, _dockApps }' },
     @{ Name='weather and clock float up with the quotes'; File='WidgetWindow.cs'; Suite='cli-side'; Old='VerticalAlignment = VerticalAlignment.Bottom,
@@ -158,7 +158,7 @@ $cases = @(
     @{ Name='Spark invalid excerpt ID coerced'; File='DollarSpark.cs';
        Old='double quoteId = e["quote_id"].D; var excerpts = QuoteExcerpts(article);'; New='double quoteId = 1; var excerpts = QuoteExcerpts(article);' },
     @{ Name='Spark validation reason hidden'; File='DollarSpark.cs';
-       Old='"Spark 응답 오류 · " + error.Message'; New='"Spark 응답 오류"' },
+       Old='"AI 응답 오류 · " + error.Message'; New='"AI 응답 오류"' },
     @{ Name='Spark invalid agents option restored'; File='DollarSpark.cs';
        Old=' -c features.multi_agent=false -c features.apps=false'; New=' -c features.multi_agent=false -c agents.enabled=false -c features.apps=false' },
     @{ Name='Spark CLI diagnostic discarded'; File='DollarSpark.cs';
@@ -166,7 +166,7 @@ $cases = @(
     @{ Name='Spark CLI stdout becomes diagnostic'; File='DollarSpark.cs';
        Old='FailureMessage(process.ExitCode, DiagnosticLines(errors.ToString()))'; New='FailureMessage(process.ExitCode, text)' },
     @{ Name='Spark raw diagnostic leaks'; File='DollarSpark.cs';
-       Old='"Spark 실행 실패 · CLI 종료 코드 " + exitCode.ToString(CultureInfo.InvariantCulture) + " · 확인되지 않은 실행 오류"'; New='standardError' },
+       Old='"AI 실행 실패 · CLI 종료 코드 " + exitCode.ToString(CultureInfo.InvariantCulture) + " · 확인되지 않은 실행 오류"'; New='standardError' },
     @{ Name='Spark first analysis blocked by throttle'; File='DollarAnalysisWindow.cs';
        Old='await RefreshCoreAsync(true);'; New='await RefreshCoreAsync(false);' },
     @{ Name='Spark successful login stays disconnected'; File='DollarAnalysisWindow.cs';
@@ -329,13 +329,18 @@ $cases = @(
             if (result != null && result.Extreme != (_analysisMode.IsChecked == true)) return;'; New='            DateTime now = DateTime.UtcNow;
             if (result != null && result.Extreme != (_analysisMode.IsChecked == true)) return;' }
 )
+# Match source text independently of Git's LF/CRLF checkout policy.
+foreach ($case in $cases) {
+    $case.Old = $case.Old.Replace("`r`n", "`n")
+    $case.New = $case.New.Replace("`r`n", "`n")
+}
 $caught = 0
 if ($CaseFilter) { $cases = @($cases | Where-Object { $_.Name -match $CaseFilter }) }
 if ($cases.Count -eq 0) { throw 'No sabotage cases selected' }
 if ($ValidateOnly) {
     $bad = 0
     foreach ($case in $cases) {
-        $source = [IO.File]::ReadAllText((Join-Path $root ('src\' + $case.File)))
+        $source = [IO.File]::ReadAllText((Join-Path $root ('src\' + $case.File))).Replace("`r`n", "`n")
         $n = [regex]::Matches($source, [regex]::Escape($case.Old)).Count
         if (($case.All -and $n -lt 1) -or (-not $case.All -and $n -ne 1)) { Write-Output ("STALE: " + $case.Name + " matches=" + $n); $bad++ }
     }
@@ -343,7 +348,7 @@ if ($ValidateOnly) {
     exit $bad
 }
 foreach ($case in $cases) {
-    $original = [IO.File]::ReadAllText((Join-Path $root ('src\' + $case.File)))
+    $original = [IO.File]::ReadAllText((Join-Path $root ('src\' + $case.File))).Replace("`r`n", "`n")
     $matchesCount = [regex]::Matches($original, [regex]::Escape($case.Old)).Count
     if (($case.All -and $matchesCount -lt 1) -or (-not $case.All -and $matchesCount -ne 1)) {
         throw ('Mutation anchor changed: ' + $case.Name)

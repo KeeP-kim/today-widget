@@ -618,6 +618,7 @@ namespace DeskWidget
                 .Select(g => g.First()).ToList();
             score.ReviewedCount = news.Count;
             double up = 0, down = 0, total = 0;
+            int bodyReadCount = 0;
             var crossChecked = new HashSet<DollarNews>();
             var groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var n in news)
@@ -636,6 +637,7 @@ namespace DeskWidget
                 double confirmation = n.Factors.Count == 0 ? 1 : Math.Min(1, 0.75 + 0.125 * corroborators.Select(other => other.Source).Distinct().Count());
                 double strength = sourceWeight * confirmation;
                 score.ArticleCount++;
+                if (n.BodyRead) bodyReadCount++;
                 if (n.Factors.Count > 0)
                 {
                     // ★ 방향을 못 낸 요인(동결·재정·이미 난 가격 변동)은 가중치가 0 이다.
@@ -677,7 +679,8 @@ namespace DeskWidget
             // Title-only evidence is provisional; missing feeds reduce it further.
             // ★ 전에는 0.5 고정이라 본문을 다 읽어도 신뢰가 오르지 않았다 - 자료를 더 읽을 이유가
             //   숫자에 없었다. 실제로 본문을 읽은 비율만큼만 올린다(제목만이면 종전과 같은 0.5).
-            double bodyRead = score.ArticleCount == 0 ? 0 : (double)news.Count(a => a.BodyRead) / score.ArticleCount;
+            // Count the same admitted articles on both sides; discarded publisher repeats cannot raise confidence.
+            double bodyRead = score.ArticleCount == 0 ? 0 : (double)bodyReadCount / score.ArticleCount;
             score.Reliability = (0.5 + 0.25 * bodyRead) * (result.DomesticAvailable && result.GlobalAvailable ? 1 : 0.5);
             if (result.TopicFeedsExpected > 0)
                 score.Reliability *= 0.5 + 0.5 * result.TopicFeedsAvailable / result.TopicFeedsExpected;

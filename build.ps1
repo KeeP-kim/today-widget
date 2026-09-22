@@ -26,22 +26,8 @@ if (-not (Test-Path $csc)) {
 # exe 뿐 아니라 DLL 폴백으로 도는 런처(powershell.exe)까지 내려야 한다.
 # 그러지 않으면 뮤텍스 때문에 새 버전이 뜨자마자 종료되고 구버전이 계속 돈다.
 if (-not $CI -and -not $AnalysisOnly) {
-Get-Process 'Onuln' -ErrorAction SilentlyContinue | ForEach-Object {
-    try { $_.CloseMainWindow() | Out-Null; Start-Sleep -Milliseconds 200 } catch { }
-    try { $_.Kill() } catch { }
-}
-
-$mePid = $PID
-try {
-    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop |
-        Where-Object { $_.ProcessId -ne $mePid -and $_.CommandLine -like '*-File*launch.ps1*' } |
-        ForEach-Object {
-            Write-Host ("  이전 런처 종료: PID " + $_.ProcessId)
-            try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch { }
-        }
-} catch { }
-
-Start-Sleep -Milliseconds 400
+    . (Join-Path $root 'installer\safety.ps1')
+    Stop-OnulnInstances @($root)
 }
 
 $sources = @(

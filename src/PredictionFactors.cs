@@ -15,6 +15,12 @@ namespace DeskWidget
         // DollarFactors 의 negated 와 같은 뜻이어야 한다. '안 하' 만 잡던 것을 활용형까지 넓혔다.
         private const string Negation = @"(?<![가-힣])안\s*(?:올|내|하|한|했|할|해)|않|아니|부인|철회|취소|무산|없[다어을]|불가(?!피)|" +
             @"\b(?:not|no|never|won't|isn't|aren't|doesn't|didn't|unlikely)\b|denied|denies|cancel|rules? out|ruled out";
+        private const string RegulationWithdrawal = @"(?:규제|제재|과세|금지|단속|소송|기소)(?:\s*(?:안|조치|계획|결정))?(?:을|를|이|가|의)?\s*(?:전면\s*|공식\s*)?(?:철회|취소|취하)";
+        private const string EasingWithdrawal = @"(?:완화|허용|합법화)(?:을|를|이|가)?\s*(?:철회|취소|무산)";
+        private const string ApprovalWithdrawal = @"(?:승인|인가|상장\s?허가)(?:을|를|이|가)?\s*(?:철회|취소|무산)|" +
+            @"\b(?:approval|authorization)\b.{0,30}\b(?:withdrawn|revoked|cancelled|canceled)\b|\b(?:withdraws?|revokes?|cancels?|cancelled|canceled)\b.{0,40}\bapproval\b";
+        private const string EtfRefusal = @"\b(?:ETF(?:\s+(?:application|approval|listing))?|application|approval|listing)(?:\s+(?:was|is|were|are|has been|had been))?\s+(?:denied|rejected|delayed)\b|" +
+            @"\b(?:denied|rejects?|rejected|delays?|delayed)\s+(?:(?!(?:reports?|rumou?rs?|claims?|that|having|allegations?)\b)[\p{L}\p{N}-]+\s+){0,5}ETF(?:\s+(?:application|approval|listing))?\b";
         internal static bool Relevant(string title, PredictionTarget target)
         {
             return Subject(title, target) || Has(title, Fed + "|" + Bok + @"|금리|관세|중동|전쟁|inflation|tariff|interest rate|stock market|crypto");
@@ -24,19 +30,42 @@ namespace DeskWidget
             string name = target.Name;
             if (target.Def.Kind == SourceKind.Fx) name = name.Replace(" 100", "");
             bool named = name.Length > 1 ? text.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0 : Has(text, Regex.Escape(name) + @"\s+(?:주가|주식|실적)");
-            return named || text.IndexOf(target.Def.Code, StringComparison.OrdinalIgnoreCase) >= 0 ||
+            if (target.Def.Kind == SourceKind.Coin && Regex.IsMatch(name, @"^[A-Za-z][A-Za-z0-9 .-]*$"))
+                named = Has(text, @"\b" + Regex.Escape(name) + @"\b");
+            bool coded = target.Def.Kind == SourceKind.Coin ? Has(text, @"\b" + Regex.Escape(target.Def.Code) + @"\b") :
+                text.IndexOf(target.Def.Code, StringComparison.OrdinalIgnoreCase) >= 0;
+            string koreanCoin = target.Def.Kind == SourceKind.Coin ? PredictionTarget.CoinKoreanName(target.Def.Code) : "";
+            return named || coded ||
+                (koreanCoin.Length > 0 && text.IndexOf(koreanCoin, StringComparison.Ordinal) >= 0) ||
                 (target.Def.Kind == SourceKind.WorldStock && PredictionTarget.Ticker(target.Def.Code).Length > 0 &&
                     Has(text, @"\b" + Regex.Escape(PredictionTarget.Ticker(target.Def.Code)) + @"\b")) ||
-                (target.Def.Kind == SourceKind.Coin && Has(text, @"\b" + Regex.Escape(target.Def.Code.Replace("KRW-", "")) + @"\b"));
+                (target.Def.Kind == SourceKind.Coin && (Has(text, @"\b" + Regex.Escape(target.Def.Code.Replace("KRW-", "")) + @"\b") ||
+                    (PredictionTarget.CoinEnglishName(target.Def.Code).Length > 0 &&
+                     Has(text, @"\b" + PredictionTarget.CoinEnglishName(target.Def.Code) + @"\b"))));
         }
-        private static void Add(List<DollarFactor> factors, DollarNews n, string text, string rule, int direction, string mechanism, string counter, double weight)
+
+        private static bool OtherNamedCoin(string text, PredictionTarget target)
+        {
+            // Keep ambiguous multi-asset clauses as context; do not assign another coin's
+            // fund flow or supply event to this target. This is a limited name guard, not NLP.
+            string[] codes = { "KRW-BTC", "KRW-ETH", "KRW-DOGE" };
+            for (int i = 0; i < codes.Length; i++)
+                if (target.Def.Code != codes[i] && (text.IndexOf(PredictionTarget.CoinKoreanName(codes[i]), StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    Has(text, @"\b(?:" + codes[i].Substring(4) + "|" + PredictionTarget.CoinEnglishName(codes[i]) + @")\b"))) return true;
+            return false;
+        }
+        private static void Add(List<DollarFactor> factors, DollarNews n, string text, string rule, int direction, string mechanism, string counter, double weight, string eventPattern = null)
         {
             // 저장하는 Rule 에는 품목 키가 앞에 붙는다. 그 접두사 없이 비교하면 이 검사가
             // 영원히 거짓이라 같은 규칙이 절마다 거듭 쌓였다 - 한 기사가 같은 근거를
             // 여러 번 낸 만큼 점수가 부풀었다.
             string key = n.Target.Key + ":" + rule;
             if (factors.Any(f => f.Rule == key && f.Direction == direction)) return;
-            bool negative = Has(text, Negation), past = Has(text, @"지난해|작년|과거|last year|in 20(?:0|1)\d");
+            // A withdrawal/refusal can be the event itself. Remove only that event's token;
+            // denials such as "withdrawal denied", "not denied", or "철회 부인" still veto it.
+            string negationText = eventPattern == null ? text : Regex.Replace(text, eventPattern,
+                m => Regex.Replace(m.Value, @"철회|취소|무산|\bdenied\b|\bcancel\w*\b", " ", RegexOptions.IgnoreCase), RegexOptions.IgnoreCase);
+            bool negative = Has(negationText, Negation), past = Has(text, @"지난해|작년|과거|last year|in 20(?:0|1)\d");
             // 확정 사건과 전망을 가른다. '우려·확률·관측·경고' 가 빠져 있어 '인상 우려' 가
             // 실제 인상과 같은 만점으로 들어갔다(실측). DollarFactors 의 목록에 맞춘다.
             bool conditional = Has(text, @"전망|예상|시사|요구|촉구|가능|우려|기대|확률|관측|베팅|경고|주장|위협|언급|발언|계획|\?|" +
@@ -83,8 +112,10 @@ namespace DeskWidget
                 //   반대 해석을 함께 적는다 - 코인에서 '선반영' 은 특히 심하다.
                 if (coin)
                 {
+                    bool otherCoin = OtherNamedCoin(text, target);
+                    bool ownCoin = subject && !otherCoin;
                     bool spot = Has(text, @"현물\s?ETF|\bspot ETF\b|비트코인\s?ETF|이더리움\s?ETF");
-                    if (spot || Has(text, @"\bETF\b"))
+                    if (ownCoin && (spot || Has(text, @"\bETF\b")))
                     {
                         bool inflow = Has(text, @"순유입|자금\s?유입|매수세\s?유입|유입.{0,6}(?:규모|기록|확대)|\binflows?\b|net buying");
                         bool outflow = Has(text, @"순유출|자금\s?유출|환매|유출.{0,6}(?:규모|기록|확대)|\boutflows?\b|net selling|redemption");
@@ -92,33 +123,38 @@ namespace DeskWidget
                             Add(factors, n, text, "etf-flow", inflow ? 1 : -1,
                                 "ETF 를 통한 자금 " + (inflow ? "유입 → 현물 매수 수요" : "유출 → 현물 매도") + " → " + target.Name + (inflow ? " 상승" : " 하락") + " 압력",
                                 "하루 흐름은 되돌려지기 쉽고 이미 가격에 반영됐을 수 있습니다. 다른 코인의 ETF 자금은 이 품목과 다를 수 있습니다.", 0.6);
-                        bool approve = Has(text, @"승인|인가|상장\s?허가|\bapproves?\b|\bapproval\b");
-                        bool reject = Has(text, @"반려|불허|거부|연기|\brejects?\b|\bdenied\b|\bdelays?\b");
+                        bool withdrawn = Has(text, ApprovalWithdrawal), refused = Has(text, EtfRefusal);
+                        bool approve = !withdrawn && !refused && Has(text, @"승인|인가|상장\s?허가|\bapproves?\b|\bapproved\b|\bapproval\b");
+                        bool reject = withdrawn || refused || Has(text, @"반려|불허|거부|연기|\breject(?:s|ed)?\b|\bdenied\b|\bdelay(?:s|ed)?\b");
                         if (approve != reject)
                             Add(factors, n, text, "etf-approval", approve ? 1 : -1,
                                 "ETF " + (approve ? "승인 → 제도권 접근성 확대 → 신규 수요 기대" : "반려·연기 → 기대했던 신규 수요가 미뤄짐"),
-                                "승인 자체가 자금 유입을 뜻하지는 않습니다. 발표 전 기대가 이미 반영돼 승인일에 오히려 빠지는 일이 잦았습니다.", 0.5);
+                                "승인 자체가 자금 유입을 뜻하지는 않습니다. 발표 전 기대가 이미 반영돼 승인일에 오히려 빠지는 일이 잦았습니다.", 0.5,
+                                withdrawn ? ApprovalWithdrawal : refused ? EtfRefusal : null);
                     }
                     if (Has(text, @"규제|제재|과세|세금|금지|단속|소송|기소|\bregulat\w*|\bban\b|\bsanction\w*|\blawsuit\b|\bsues?\b|\bSEC\b|\bCFTC\b|\bcrypto (?:rules?|regulations?|laws?)\b|\blegaliz\w*|\bderegulat\w*"))
                     {
                         // 결말이 원인을 이긴다. '소송 기각' 은 소송이 아니라 해소로 읽어야 한다.
                         // '해소' 가 어디에도 없어서 '규제 불확실성 해소' 가 방향 없는 기사가 됐다.
                         // 규제가 걷히는 것은 이 시장에서 가장 자주 인용되는 상승 재료다.
-                        bool resolved = Has(text, @"기각|무혐의|승소|취하|철회|불확실성.{0,6}(?:해소|완화)|규제.{0,8}해소|" +
-                            @"\bdismiss\w*|\bdrops? (?:the )?(?:case|charges?)\b|\bacquit\w*|regulatory clarity|\bclarity\b");
-                        bool loosen = resolved || Has(text, @"완화|허용|합법화|\bapproves?\b|\beases?\b|\ballow\w*");
-                        bool tighten = !resolved && Has(text, @"강화|도입|금지|제재|단속|과세|소송|기소|\bcrack\w*|\bban\b|\bsues?\b|\bcharges?\b|tighten\w*");
+                        bool withdrawnRestriction = Has(text, RegulationWithdrawal), withdrawnEasing = Has(text, EasingWithdrawal);
+                        bool resolved = !withdrawnEasing && (withdrawnRestriction || Has(text, @"기각|무혐의|승소|취하|불확실성.{0,6}(?:해소|완화)|규제.{0,8}해소|" +
+                            @"\bdismiss\w*|\bdrops? (?:the )?(?:case|charges?)\b|\bacquit\w*|regulatory clarity|\bclarity\b"));
+                        bool loosen = !withdrawnEasing && (resolved || Has(text, @"완화|허용|합법화|\bapproves?\b|\beases?\b|\ballow\w*"));
+                        bool tighten = withdrawnEasing || !resolved && Has(text, @"강화|도입|금지|제재|단속|과세|소송|기소|\bcrack\w*|\bban\b|\bsues?\b|\bcharges?\b|tighten\w*");
                         if (tighten != loosen)
                             Add(factors, n, text, "crypto-regulation", tighten ? -1 : 1,
                                 "규제 " + (tighten ? "강화·법적 다툼 → 접근성 축소·불확실성 → 매도 압력" : "완화·해소 → 불확실성 감소 → 매수 여력 회복"),
-                                "규제는 나라마다 다르고 시행까지 시간이 걸립니다. 발표만으로 실제 자금 흐름이 바뀌지 않을 수 있습니다.", 0.55);
+                                "규제는 나라마다 다르고 시행까지 시간이 걸립니다. 발표만으로 실제 자금 흐름이 바뀌지 않을 수 있습니다.", 0.55,
+                                withdrawnEasing ? EasingWithdrawal : withdrawnRestriction ? RegulationWithdrawal : null);
                     }
-                    if (Has(text, @"해킹|탈취|유출\s?사고|거래소.{0,10}(?:파산|정지|중단)|출금\s?중단|\bhack\w*|\bexploit\w*|\bbreach\b|\binsolvenc\w*") &&
+                    if ((ownCoin || (!otherCoin && Has(text, @"거래소|출금|\bexchanges?\b"))) &&
+                        Has(text, @"해킹|탈취|유출\s?사고|거래소.{0,10}(?:파산|정지|중단)|출금\s?중단|\bhack\w*|\bexploit\w*|\bbreach\b|\binsolvenc\w*") &&
                         !Has(text, @"복구|보상|환급|되찾|\brecover\w*|\brefund\w*"))
                         Add(factors, n, text, "exchange-incident", -1,
                             "거래소·프로토콜 사고 → 신뢰 훼손과 강제 매도 → " + target.Name + " 하락 압력",
                             "규모가 작거나 다른 코인·거래소의 일이면 영향이 제한됩니다. 사고 직후 저가 매수가 들어오기도 합니다.", 0.6);
-                    if (Has(text, @"고래|대량\s?(?:이체|이동|매집|매도)|\bwhale\w*"))
+                    if (ownCoin && Has(text, @"고래|대량\s?(?:이체|이동|매집|매도)|\bwhale\w*"))
                     {
                         bool toExchange = Has(text, @"거래소.{0,8}(?:입금|이체|전송)|매도\s?준비|\bto exchanges?\b|\bdeposit\w*");
                         bool fromExchange = Has(text, @"거래소.{0,8}(?:출금|인출)|장기\s?보관|콜드월렛|\bwithdraw\w*|\bto cold\b");
@@ -127,7 +163,7 @@ namespace DeskWidget
                                 "대량 보유분이 거래소로 " + (toExchange ? "들어옴 → 매도 준비로 읽히는 흐름" : "빠져나감 → 단기 매도 물량 감소"),
                                 "지갑 이동이 곧 매매는 아닙니다. 이 신호는 널리 인용되지만 근거가 약하니 참고로만 봅니다.", 0.2);
                     }
-                    if (Has(text, @"반감기|\bhalving\b"))
+                    if (ownCoin && Has(text, @"반감기|\bhalving\b"))
                         Add(factors, n, text, "halving", 1,
                             "반감기 → 신규 공급 감소 → 장기 수급 개선 기대",
                             "일정이 미리 알려져 있어 선반영 정도가 큽니다. 짧은 기간의 방향 근거로 삼기 어렵습니다.", 0.15);
@@ -142,7 +178,7 @@ namespace DeskWidget
                                 "발행이 곧 매수는 아니며 다른 시장으로 갈 수도 있습니다.", 0.3);
                     }
                     // '매수' 가 목록에 없어 '기관 투자자 매수 확대' 가 통째로 빠졌다.
-                    if (Has(text, @"(?:기업|국가|연기금|기관).{0,14}(?:매입|매수|채택|편입|보유|축적)|법정\s?통화\s?채택|" +
+                    if (ownCoin && Has(text, @"(?:기업|국가|연기금|기관).{0,14}(?:매입|매수|채택|편입|보유|축적)|법정\s?통화\s?채택|" +
                         @"\badopts?\b.{0,20}\b(?:bitcoin|crypto)\b|\bcorporate treasury\b|\binstitution\w*\b.{0,20}\b(?:buy\w*|accumulat\w*|inflow\w*)\b"))
                         Add(factors, n, text, "institutional-adoption", 1,
                             "기관·국가의 매입·채택 → 장기 보유 수요 → " + target.Name + " 지지",

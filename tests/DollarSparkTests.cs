@@ -20,9 +20,61 @@ namespace DeskWidget
             Check(rejected, reason);
         }
 
+        private static void MarketSnapshotChecks()
+        {
+            var now = new DateTime(2026, 9, 22, 18, 0, 0, DateTimeKind.Utc);
+            var source = new DollarAnalysisResult {
+                Target = new PredictionTarget(new SymbolDef(SourceKind.Coin, "KRW-DOGE", "도지코인")),
+                HistorySource = "completed fixture candles", RoundTripPercent = 0.2,
+                Quote = new Quote { Ok = true, Value = 250, Source = "live fixture", IdentityKey = "coin:KRW-DOGE", ReceivedUtc = now, ProviderUtc = now, TradedUtc = now, ProviderTimeRequired = true }
+            };
+            for (int i = 0; i < 32; i++) source.Rates.Add(new DollarRate { Date = now.Date.AddDays(i - 32), Value = 100 + i });
+            var p = new DollarPattern { Horizon = 1, Up = 40, LatestDate = now.Date.AddDays(-1) };
+            p.Returns.AddRange(new[] { -0.02, 0.02 }); source.Patterns.Add(p);
+            string clean = DollarSpark.MarketInput(source, now);
+            source.Rates.Add(new DollarRate { Date = now.Date, Value = 150 });
+            source.Rates.Add(new DollarRate { Date = now.Date.AddDays(1), Value = 160 });
+            Check(clean == DollarSpark.MarketInput(source, now), "coin open UTC candle or future candle leaked into model input");
+            var data = Json.Parse(clean); var history = data["history"]; var mapping = data["forecast_mapping"];
+            Check(data["quote"]["provider_utc"].S == now.ToString("o") && data["quote"]["traded_utc"].S == now.ToString("o")
+                && clean.Contains("\"fresh_for_scoring\":true"), "coin timestamp provenance missing from AI input");
+            Check(history["last_completed_date"].S == "2026-09-21" && history["last_completed_value"].D == 131,
+                "completed coin candle cutoff uses Korean calendar date");
+            Check(history["returns"][1]["observations"].D == 7 && mapping[1]["steps"].D == 7 &&
+                mapping[1]["due_if_recorded_now_utc"].S == now.AddDays(7).ToString("o"), "coin weekly history or expiry treated as five days");
+            Check(Math.Abs(history["returns"][1]["percent"].D - (131.0 / 124 - 1) * 100) < 1e-9,
+                "weekly return mixes live quote and historical provider");
+            Check(data["quote"]["value"].D == 250 && data["quote"]["source"].S == "live fixture" &&
+                history["source"].S == "completed fixture candles", "quote and history provenance lost");
+            var daily = Enumerable.Range(112, 20).Select(v => (double)v / (v - 1) * 100 - 100).ToArray();
+            double mean = daily.Average(); double stddev = Math.Sqrt(daily.Sum(v => (v - mean) * (v - mean)) / 19);
+            Check(Math.Abs(history["daily_return_stddev_20_percent"].D - stddev) < 1e-9, "volatility units or 20-return window incorrect");
+            Check(Math.Abs(mapping[0]["span_percent"].D - 1.6) < 1e-9 &&
+                Math.Abs(mapping[0]["absolute_score_to_exceed_neutral"].D - 12.5) < 1e-9 && mapping[0]["neutral_band_percent"].D == 0.2,
+                "model score mapping differs from forecast scale or configured cost band");
+            Check(mapping[1]["span_percent"].S == null && double.IsNaN(mapping[1]["span_percent"].D), "missing historical scale encoded as zero");
+            var promptData = Json.Parse(DollarSpark.Input(source, new List<DollarNews>(), now, clean));
+            Check(promptData["market_snapshot"]["history"]["last_completed_value"].D == 131,
+                "captured numeric snapshot not wired into actual AI input");
+            source.Rates.RemoveAll(r => r.Date >= now.Date);
+            source.Rates = source.Rates.Select(r => new DollarRate { Date = r.Date.AddDays(-10), Value = r.Value }).ToList();
+            Check(DollarSpark.MarketInput(source, now).Contains("\"stale\":true"), "stale prices presented as current context");
+            source.Target = new PredictionTarget(null);
+            var fx = Json.Parse(DollarSpark.MarketInput(source, now));
+            Check(fx["history"]["returns"][1]["observations"].D == 5 && fx["forecast_mapping"][1]["steps"].D == 5 &&
+                fx["forecast_mapping"][1]["due_if_recorded_now_utc"].S == PredictionJournal.Due(now, source.Target, 5).ToString("o"),
+                "FX five-observation history and five-weekday expiry disagree");
+            source.Rates.Clear();
+            Check(Json.Parse(DollarSpark.MarketInput(source, now))["history"].S == null, "missing price history fabricated");
+            source.Rates.Add(new DollarRate { Date = now.Date.AddDays(-1), Value = double.NaN });
+            string invalid = DollarSpark.MarketInput(source, now);
+            Check(Json.Parse(invalid).IsObject && !invalid.Contains("NaN") && !invalid.Contains("Infinity"), "nonfinite price corrupted input JSON");
+        }
+
         internal static int Run(string work)
         {
             count = 0; DateTime now = DateTime.UtcNow;
+            MarketSnapshotChecks();
             var source = new DollarAnalysisResult { CheckedUtc = now, DomesticAvailable = true, GlobalAvailable = true };
             source.News.Add(new DollarNews { Title = "Federal Reserve raises interest rates", Source = "BBC", PublishedUtc = now,
                 Url = "https://news.google.com/articles/spark1" });
@@ -88,13 +140,13 @@ namespace DeskWidget
                 System.Text.RegularExpressions.Regex.Replace(DollarSpark.SourceText(source.News[0]), @"\s+", " ").Trim() && input["articles"].Count == 2,
                 "hostile news escaped JSON data boundary");
             string args = DollarSpark.Arguments(Path.Combine(work, "spark task"));
-            Check(args.Contains("--model gpt-5.3-codex-spark") && args.Contains("--ignore-user-config") && args.Contains("--sandbox read-only") &&
-                args.Contains("features.shell_tool=false") && args.Contains("features.multi_agent=false") && !args.Contains("agents.enabled=") && !args.Contains("Get-Content"), "Spark CLI permissions or fixed model changed");
+            Check(args.Contains("--model gpt-5.6-luna") && args.Contains("--ignore-user-config") && args.Contains("--sandbox read-only") &&
+                args.Contains("features.shell_tool=false") && args.Contains("features.multi_agent=false") && !args.Contains("agents.enabled=") && !args.Contains("Get-Content"), "Luna CLI permissions or fixed model changed");
             Check(DollarSpark.FailureMessage(1, "Error loading config.toml: invalid type: boolean `false`, expected struct AgentRoleToml in agents").Contains("실행 옵션 오류"), "CLI configuration error misreported as login or quota");
             Check(DollarSpark.FailureMessage(2, "unexpected argument '--obsolete'").Contains("실행 옵션 오류"), "unsupported CLI option not explained");
             Check(DollarSpark.FailureMessage(1, "invalid_json_schema: response format").Contains("응답 형식 오류"), "schema error misreported");
             Check(DollarSpark.FailureMessage(1, "usage_limit_reached").Contains("한도 초과"), "quota error misreported");
-            Check(DollarSpark.FailureMessage(1, "The model is not supported when using Codex with a ChatGPT account").Contains("모델 사용 불가"), "unsupported Spark model misreported");
+            Check(DollarSpark.FailureMessage(1, "The model is not supported when using Codex with a ChatGPT account").Contains("모델 사용 불가"), "unsupported Luna model misreported");
             Check(DollarSpark.FailureMessage(1, "401 unauthorized").Contains("인증 오류"), "authentication error misreported");
             Check(DollarSpark.FailureMessage(1, "certificate verify failed").Contains("보안 연결 오류"), "TLS failure misreported");
             Check(DollarSpark.FailureMessage(1, "error sending request for url").Contains("서버 연결 실패"), "network failure misreported");

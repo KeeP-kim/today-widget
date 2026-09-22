@@ -97,7 +97,8 @@ namespace DeskWidget
             SourceKind k = kind == "coin" ? SourceKind.Coin : kind == "wstock" ? SourceKind.WorldStock
                 : kind == "dstock" ? SourceKind.DomesticStock : kind == "index" ? SourceKind.Index
                 : kind == "weather" ? SourceKind.Weather : SourceKind.Fx;
-            return new PredictionTarget(new SymbolDef(k, code, code));
+            string label = k == SourceKind.Coin ? PredictionTarget.CoinKoreanName(code) : "";
+            return new PredictionTarget(new SymbolDef(k, code, label.Length > 0 ? label : code));
         }
 
         private static double Num(XmlElement e, string name)
