@@ -12,6 +12,7 @@ namespace DeskWidget
     internal sealed class BriefTextBlock : Control
     {
         internal const double Tracking = -0.05;
+        internal bool KoreanTrackingOnly;
         public static readonly DependencyProperty TextProperty = DependencyProperty.Register("Text", typeof(string), typeof(BriefTextBlock), new FrameworkPropertyMetadata("", FrameworkPropertyMetadataOptions.AffectsMeasure | FrameworkPropertyMetadataOptions.AffectsRender));
         public string Text { get { return (string)GetValue(TextProperty); } set { SetValue(TextProperty, value); } }
         public TextAlignment TextAlignment { get; set; }
@@ -20,7 +21,7 @@ namespace DeskWidget
         public double LineHeight { get; set; }
         public LineStackingStrategy LineStackingStrategy { get; set; }
         public BriefTextBlock() { TextWrapping = TextWrapping.Wrap; LineHeight = double.NaN; }
-        private double RowHeight { get { return double.IsNaN(LineHeight) ? FontSize * 1.45 : LineHeight; } }
+        private double RowHeight { get { return double.IsNaN(LineHeight) ? FontSize * KoreanTextBlock.LineHeightRatio : LineHeight; } }
         private FormattedText Format(string text)
         { return new FormattedText(text, CultureInfo.GetCultureInfo("ko-KR"), FlowDirection.LeftToRight,
             new Typeface(FontFamily, FontStyle, FontWeight, FontStretch), FontSize, Foreground, VisualTreeHelper.GetDpi(this).PixelsPerDip); }
@@ -51,13 +52,18 @@ namespace DeskWidget
         internal double TextWidth(string text)
         {
             var glyphs = Glyphs(text); double width = 0;
-            foreach (string glyph in glyphs) width += GlyphWidth(glyph);
-            return Math.Max(0, width + Math.Max(0, glyphs.Count - 1) * FontSize * Tracking);
+            for (int i = 0; i < glyphs.Count; i++)
+                width += GlyphWidth(glyphs[i]) + (i + 1 < glyphs.Count ? Gap(glyphs[i], glyphs[i + 1]) : 0);
+            return Math.Max(0, width);
         }
+        private double Gap(string left, string right)
+        { return !KoreanTrackingOnly || KoreanTextBlock.HasHangul(left) && KoreanTextBlock.HasHangul(right) ? FontSize * Tracking : 0; }
         internal List<string> Lines(double width)
         {
             var lines = new List<string>();
-            if (TextWrapping == TextWrapping.NoWrap) { lines.Add(Text ?? ""); return lines; }
+            if (TextWrapping == TextWrapping.NoWrap) {
+                foreach (string paragraph in (Text ?? "").Replace("\r", "").Split('\n')) lines.Add(TrimLine(paragraph, width)); return lines;
+            }
             foreach (string paragraph in (Text ?? "").Replace("\r", "").Split('\n')) {
                 string line = "";
                 foreach (Match match in Regex.Matches(paragraph, @"\S+\s*")) {
@@ -68,6 +74,18 @@ namespace DeskWidget
                 lines.Add(line.TrimEnd());
             }
             return lines;
+        }
+        private string TrimLine(string text, double width)
+        {
+            if (TextTrimming == TextTrimming.None || TextWidth(text) <= width) return text;
+            var glyphs = Glyphs(text); int low = 0, high = glyphs.Count;
+            while (low < high) {
+                int middle = (low + high + 1) / 2;
+                if (TextWidth(string.Join("", glyphs.GetRange(0, middle)) + "…") <= width) low = middle; else high = middle - 1;
+            }
+            string value = string.Join("", glyphs.GetRange(0, low));
+            if (TextTrimming == TextTrimming.WordEllipsis && value.LastIndexOf(' ') > 0) value = value.Substring(0, value.LastIndexOf(' '));
+            return value + "…";
         }
         protected override Size MeasureOverride(Size constraint)
         {
@@ -83,10 +101,11 @@ namespace DeskWidget
                 double scale = natural > ActualWidth && ActualWidth > 0 ? ActualWidth / natural : 1;
                 context.PushTransform(new TranslateTransform(0, y));
                 context.PushTransform(new ScaleTransform(scale, 1));
-                double x = TextAlignment == TextAlignment.Center ? Math.Max(0, (ActualWidth - TextWidth(line)) / 2) : 0;
-                foreach (string glyph in Glyphs(line)) {
-                    context.DrawText(Format(glyph), new Point(x, 0));
-                    x += GlyphWidth(glyph) + FontSize * Tracking;
+                double x = TextAlignment == TextAlignment.Center ? Math.Max(0, (ActualWidth - TextWidth(line)) / 2) : TextAlignment == TextAlignment.Right ? Math.Max(0, ActualWidth - TextWidth(line)) : 0;
+                var glyphs = Glyphs(line);
+                for (int i = 0; i < glyphs.Count; i++) {
+                    context.DrawText(Format(glyphs[i]), new Point(x, 0));
+                    x += GlyphWidth(glyphs[i]) + (i + 1 < glyphs.Count ? Gap(glyphs[i], glyphs[i + 1]) : 0);
                 }
                 context.Pop(); context.Pop();
                 y += RowHeight;

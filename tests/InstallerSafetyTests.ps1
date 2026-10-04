@@ -81,6 +81,7 @@ Put (Join-Path $src 'config.json') '{"version":"test","apps":[{"file":"sample.ln
 Put (Join-Path $src '앱저장\즐겨찾기\sample.lnk') 'synthetic shortcut'
 Put (Join-Path $src '앱저장\즐겨찾기\sample.lnk.png') 'synthetic custom icon'
 Put (Join-Path $src 'prediction-history\sample.xml') 'synthetic history'
+Put (Join-Path $src 'analysis-runs\sample.xml') 'synthetic model run'
 Put (Join-Path $src 'dollar-analysis.json') '{"synthetic":true}'
 $otherApp = Join-Path $work 'other-app-destination'
 Put (Join-Path $otherApp 'launch.ps1') '# unrelated launcher'
@@ -111,7 +112,7 @@ $start = $installerText.IndexOf('# ---------- 3)'); $end = $installerText.IndexO
 Assert ($start -ge 0 -and $end -gt $start) 'Cannot locate the bounded installer copy phase.'
 & ([scriptblock]::Create($installerText.Substring($start, $end - $start)))
 Assert (Test-Path -LiteralPath (Join-Path $dst '오늘은.exe')) 'Copy-created ownership markers caused deletion of a foreign legacy filename.'
-foreach ($name in @('앱저장\즐겨찾기\sample.lnk', '앱저장\즐겨찾기\sample.lnk.png', 'prediction-history\sample.xml', 'dollar-analysis.json', 'config.json')) {
+foreach ($name in @('앱저장\즐겨찾기\sample.lnk', '앱저장\즐겨찾기\sample.lnk.png', 'prediction-history\sample.xml', 'analysis-runs\sample.xml', 'dollar-analysis.json', 'config.json')) {
     Assert ([IO.File]::ReadAllText((Join-Path $dst $name)) -eq [IO.File]::ReadAllText((Join-Path $src $name))) ('User state was not preserved: ' + $name)
 }
 Remove-OnulnLegacyFiles $dst $true

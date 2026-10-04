@@ -167,7 +167,7 @@ function Copy-OnulnUserData([string]$Source, [string]$Destination) {
     $targetRoot = Get-OnulnFullPath $Destination
     if ($sourceRoot -ieq $targetRoot) { return }
     $pending = New-Object 'Collections.Generic.Queue[string]'
-    foreach ($name in @('앱저장', 'apps', 'prediction-history', 'dollar-analysis.json')) {
+    foreach ($name in @('앱저장', 'apps', 'prediction-history', 'analysis-runs', 'dollar-analysis.json')) {
         $path = Assert-OnulnContainedPath $sourceRoot (Join-Path $sourceRoot $name)
         if ($targetRoot -ieq $path -or $targetRoot.StartsWith($path + '\', [StringComparison]::OrdinalIgnoreCase)) {
             throw 'The destination cannot be inside the source data folder.'

@@ -76,7 +76,8 @@ namespace DeskWidget
             var requests = queries.Select((q, i) => Net.GetTextAsync("https://news.google.com/rss/search?q=" + Uri.EscapeDataString(q + " when:1d") +
                 (i % 2 == 0 ? "&hl=ko&gl=KR&ceid=KR:ko" : "&hl=en-US&gl=US&ceid=US:en"), ct)).ToArray();
             var direct = DollarNewsSources.Feeds.Select(url => Net.GetTextAsync(url, ct)).ToArray();
-            await Task.WhenAll(requests.Concat(direct));
+            var market = MarketNewsContext.StartSearches(ct);
+            await Task.WhenAll(requests.Concat(direct).Concat(market));
             result.TopicFeedsExpected = requests.Length + direct.Length;
             for (int i = 0; i < requests.Length; i++)
             {
@@ -96,6 +97,7 @@ namespace DeskWidget
             result.News = result.News.OrderByDescending(n => DollarNewsSources.IsArticle(n.Url))
                 .GroupBy(n => System.Text.RegularExpressions.Regex.Replace(n.Title.Split(new[] { " - " }, StringSplitOptions.None)[0], @"[^\p{L}\p{N}]", "").ToLowerInvariant()).Select(g => g.First()).ToList();
             await DollarNewsSources.EnrichAsync(result.News, ct);
+            await MarketNewsContext.CompleteAsync(result, direct.Select(r => r.Result).ToArray(), market.Select(r => r.Result).ToArray(), now, ct);
             return result.News.Count;
         }
 

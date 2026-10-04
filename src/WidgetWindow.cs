@@ -1,3 +1,4 @@
+using TextBlock = DeskWidget.KoreanTextBlock;
 // 위젯 본체 UI
 using System;
 using System.Collections.Generic;
@@ -6273,7 +6274,6 @@ namespace DeskWidget
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 TextAlignment = TextAlignment.Center,
-                LineHeight = DockFont + 1,
                 LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
             };
 
@@ -6750,7 +6750,6 @@ namespace DeskWidget
                 VerticalAlignment = VerticalAlignment.Center,
                 TextWrapping = centered ? TextWrapping.Wrap : TextWrapping.NoWrap,
                 TextTrimming = centered ? TextTrimming.None : TextTrimming.CharacterEllipsis,
-                LineHeight = centered ? size * 1.15 : double.NaN,
                 LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
             };
         }
@@ -6795,7 +6794,12 @@ namespace DeskWidget
                 inner.Orientation = Orientation.Horizontal;
                 inner.Children.Add(iconHost);
                 inner.Children.Add(DockLine(temp, f, Palette.Text, false));
-                inner.Children.Add(DockLine(def.Label, f - 1, Palette.TextFaint, false, new Thickness(5, 0, 0, 0)));
+                var place = DockLine(def.Label, f - 1, Palette.TextFaint, false, new Thickness(5, 0, 0, 0));
+                // 가로 날씨 바에서는 짧은 지역명도 말줄임 폭을 먼저 차지한다.
+                // 온도와 함께 지역명이 온전히 보이도록 글자 폭을 확보한다.
+                place.TextTrimming = TextTrimming.None;
+                place.MinWidth = place.TextWidth(def.Label ?? "");
+                inner.Children.Add(place);
             }
 
             var box = new Border

@@ -126,9 +126,9 @@ namespace DeskWidget
             try {
                 // 기록 한 건은 기사 전건과 3년치 환율이 들어간다. 상한 없이 올리면
                 // 손상되거나 부풀려진 파일 하나가 화면 스레드를 통째로 붙든다(PredictionJournal.Read 와 같은 잣대).
-                if (new FileInfo(path).Length > 4194304) return null;
+                if (new FileInfo(path).Length > PredictionJournal.MaxRecordBytes) return null;
                 var doc = new XmlDocument { XmlResolver = null };
-                using (var reader = XmlReader.Create(path, new XmlReaderSettings { XmlResolver = null, DtdProcessing = DtdProcessing.Prohibit, MaxCharactersInDocument = 4194304 }))
+                using (var reader = XmlReader.Create(path, new XmlReaderSettings { XmlResolver = null, DtdProcessing = DtdProcessing.Prohibit, MaxCharactersInDocument = PredictionJournal.MaxRecordBytes }))
                     doc.Load(reader);
                 return doc;
             } catch (XmlException) { return null; } catch (IOException) { return null; }

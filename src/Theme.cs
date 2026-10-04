@@ -5,6 +5,7 @@ using System;
 using System.IO;
 using System.Text;
 using System.Windows;
+using System.Windows.Data;
 using System.Windows.Markup;
 
 namespace DeskWidget
@@ -156,6 +157,11 @@ namespace DeskWidget
 
         public static void Apply(Application app)
         {
+            // Content stays a string, so event handlers and dynamic labels keep their existing contract.
+            var label = new FrameworkElementFactory(typeof(KoreanTextBlock));
+            label.SetBinding(KoreanTextBlock.TextProperty, new Binding());
+            var strings = new DataTemplate(typeof(string)) { VisualTree = label };
+            app.Resources[new DataTemplateKey(typeof(string))] = strings;
             try
             {
                 using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(Xaml)))

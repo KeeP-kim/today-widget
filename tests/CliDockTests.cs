@@ -1,3 +1,4 @@
+using TextBlock = DeskWidget.KoreanTextBlock;
 using System;
 using System.Collections.Generic;
 using System.IO;

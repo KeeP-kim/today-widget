@@ -38,9 +38,16 @@ namespace DeskWidget
             try
             {
                 if (suite == "cli-live") checks += CliDockTests.Live();
+                if (suite == "all" || suite == "forecast-review") checks += ForecastReviewTests.Run(work);
+                if (suite == "all" || suite == "policy-context") checks += PolicyContextTests.Run(work);
+                if (suite == "policy-layout") checks += PolicyContextTests.Layout(work);
+                if (suite == "daily-review-live") checks += ForecastReviewTests.Live(root, work);
+                if (suite == "all" || suite == "typography") checks += TypographyTests.Run(work, suite == "typography");
                 if (suite == "all" || suite == "backdrop") checks += DockBackdropTests.Run(work);
                 if (suite == "all" || suite == "cli-side") checks += CliDockTests.Run(work);
                 if (suite == "all" || suite == "primary" || suite == "primary-layout") checks += PrimaryForecastTests.Run(work, suite == "primary-layout");
+                if (suite == "all" || suite == "analysis-login") checks += AnalysisLoginTests.Run(work);
+                if (suite == "all" || suite == "model-comparison") checks += ModelComparisonTests.Run(work);
                 if (suite == "all" || suite == "placement") checks += PredictionPlacementTests.Run(work);
                 if (suite == "calibration-live") checks += DeepPredictionTests.Live(work);
                 if (suite == "all" || suite == "surge") checks += SurgeTests.Run(work);
@@ -60,10 +67,13 @@ namespace DeskWidget
                 if (suite == "all" || suite == "ui") CollapsedQuotes(work);
                 if (suite == "all" || suite == "docs") { Readme(root); BuildSources(root); DocCounts(root); SlowLaneWiring(root); TradedDateWiring(root); WeatherSearchWiring(root); ModeNaming(root); }
                 if (suite == "all" || suite == "dollar") checks += DollarAnalysisTests.Run(work);
+                if (suite == "all" || suite == "market" || suite == "market-context") checks += MarketNewsContextTests.Run(work);
+                if (suite == "market-context-live") checks += MarketNewsContextTests.Live(work);
+                if (suite == "market-live") checks += DollarSparkTests.LiveMarket(work);
                 if (suite == "dollar-live") checks += DollarAnalysisTests.Live(work);
-                if (suite == "astra-live") checks += DollarSparkTests.Live(work, "gpt-6-astra");
-                if (suite == "luna-live" || suite == "spark-live") checks += DollarSparkTests.Live(work);
-                if (suite == "luna-doge-live" || suite == "spark-doge-live") checks += DollarSparkTests.LiveDoge(work);
+                if (suite == "sol-live") checks += DollarSparkTests.Live(work, "gpt-6.1-sol", true);
+                if (suite == "sol-dollar-live") checks += DollarSparkTests.LiveDollarSol(work);
+                if (suite == "sol-doge-live") checks += DollarSparkTests.LiveDoge(work, DollarSpark.Model);
                 if (suite == "dollar-layout") checks += DollarLayoutTests.Run(work, true);
                 if (suite == "prediction-layout") checks += PredictionTests.Run(work, true);
                 if (suite == "prediction-live") checks += PredictionTests.Live(root);

@@ -1,3 +1,4 @@
+using TextBlock = DeskWidget.KoreanTextBlock;
 // 설치된 앱 고르기.
 //
 // Claude·ChatGPT·Gemini·Microsoft 365 같은 것들은 Store 앱이거나 Edge 웹앱이라

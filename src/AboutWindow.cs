@@ -1,4 +1,5 @@
-﻿// 정보 창 - 버전, 데이터 출처, 전체 구조
+using TextBlock = DeskWidget.KoreanTextBlock;
+// 정보 창 - 버전, 데이터 출처, 전체 구조
 using System;
 using System.IO;
 using System.Windows;
@@ -486,7 +487,6 @@ namespace DeskWidget
                     FontFamily = new FontFamily("Consolas, D2Coding, Malgun Gothic"),
                     FontSize = 10.5,
                     Foreground = Palette.TextDim,
-                    LineHeight = 16,
                 },
             };
         }

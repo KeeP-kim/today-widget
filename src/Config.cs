@@ -46,10 +46,22 @@ namespace DeskWidget
             "1.040",  // 휴일 고시환율 제외, 미국 주식 만기를 거래소 요일로, 장부 기후값을 기간별로
             "1.049",  // 코인 기사 대상 귀속 교정, AI에 최근 가격과 기간별 환산 기준 전달
             "1.050",  // Accepted evidence reliability, outcome rules and coin timestamp eligibility.
+            "1.051",  // Broad market discovery and seven-day AI background evidence; historical scores stay immutable.
+            "1.056",  // Validated outcome review and expanded daily discovery; no historical score changes.
+            "1.057",  // Dated public policy/calendar context and policy discovery; prior outcomes preserved.
         };
 
         public static readonly string[][] Changelog =
         {
+            new[] { "1.059", "하단 상태표시줄 위 날씨 단독 표시에서 지역명이 일찍 말줄임되는 현상을 줄인다", "가로 날씨 바는 지역명 전체 폭을 확보하고 말줄임을 끈다", "세로 바·투명 배경·기존 날씨 표시 방식은 유지한다" },
+            new[] { "1.058", "AI 전망을 Sol 6.1 High 하나로 고정한다", "Astra·Luna 선택·3모델 비교·다른 모델 재시도를 제거한다", "기존 예측·채점·실행 기록과 과거 결과 참고 선택은 보존한다" },
+            new[] { "1.057", "미국·한국의 정부 목적·실제 조치·시장 반응을 구분해 AI 전망을 검토한다", "발표일과 확인일이 구분된 공식 정책·일정 배경을 7일간 제공한다", "주간 발표 일정·수출입 수급·원화 환산의 반대 경로와 공휴일 미반영 한계를 함께 점검한다" },
+            new[] { "1.056", "전일 예측의 채점·오차·만기 대기·놓친 관측을 구분해 표시한다", "동일 시세 출처의 검증된 과거 결과를 AI에 참고 자료로 전달한다", "현재 경제 지표·외환 수급·디지털자산 뉴스를 추가 수집하고 새 성적 판으로 구분한다" },
+            new[] { "1.055", "한글 제목·설명·버튼에 글자 크기의 -0.05배 자간을 적용한다", "표시 문장의 행간을 글자 크기의 1.3배로 통일한다", "가격 숫자와 영문, 시계의 글꼴 크기 구분은 유지한다" },
+            new[] { "1.054", "Sol 6.1 · High를 추가하고 새 설정의 기본 모델로 사용한다", "같은 기사·시세로 세 모델의 전망·처리 시간·실패와 기간이 끝난 예측 성적을 비교한다", "분석 취소와 실패 후 다른 모델 재시도를 제공한다 · 기존 모델 선택과 예측 기록은 보존한다" },
+            new[] { "1.053", "Astra의 분석 대기 시간을 2분에서 5분으로 늘린다", "분석 경과 시간과 최대 대기 시간을 표시하고 취소 시 안내 갱신을 멈춘다", "모델 변경 뒤 이전 모델의 실패 안내가 남지 않도록 고친다" },
+            new[] { "1.052", "AI 전망 갱신 시 기존 ChatGPT 로그인을 확인해 바로 분석한다", "로그인 확인·분석 중·갱신 대기를 구분하고 로그인 뒤에도 남던 안내를 고친다", "직접 연결을 해제하면 다시 연결할 때까지 AI 분석을 멈춘다" },
+            new[] { "1.051", "세계·경제 뉴스에서 미리 정한 단어 밖의 시장 변수도 AI가 검토한다", "최근 7일의 배경 자료를 보존하고 최신 근거와 구분한다", "새 사건·반대 근거·영향 지속 조건을 함께 분석하고 실제 전달한 기사를 기록한다" },
             new[] { "1.050", "종목별 지연·체결 시각을 확인하고 오래된 시세를 모든 보기에서 숨긴다", "중복 근거·철회/거절 판정·한글 코인 장부를 고친다", "설치 시 파일과 사용자 기록을 보호하고 검색 취소·저장 실패 안내를 고친다" },
             new[] { "1.049", "도지코인 영문 기사를 인식하고 다른 코인의 개별 사건이 섞이던 계산을 고친다", "AI에 최근 등락·변동성·실제 예측 기간과 가격 환산 기준을 전달한다", "보낸 숫자 입력을 기록하고 새 예측 성적을 이전 판과 구분한다 · 적중률 개선은 관측 대기" },
             new[] { "1.048", "Codex Spark 대신 Luna를 기본 분석 모델로 사용한다", "기존 Spark 예측 기록은 모델 이름과 성적을 그대로 보존한다" },
@@ -643,6 +655,7 @@ namespace DeskWidget
         public int WeatherIntervalSec = 600;
         public int SparkRefreshIntervalSec = 0;
         public string AnalysisModel = DollarSpark.Model;
+        public bool AnalysisReviewHistory = false; // Explicit opt-in: send validated past outcomes to the selected AI.
         internal static int SparkInterval(double seconds)
         { return seconds == 0 ? 0 : double.IsNaN(seconds) || seconds < 60 || seconds > 21600 ? 300 : (int)seconds; }
 
@@ -852,6 +865,7 @@ namespace DeskWidget
                 WeatherIntervalSec = (int)Clamp(j["weatherIntervalSec"].D, MinWeatherInterval, MaxInterval, 600);
                 SparkRefreshIntervalSec = SparkInterval(j["sparkRefreshIntervalSec"].D);
                 AnalysisModel = DollarSpark.ModelId(j["analysisModel"].S);
+                AnalysisReviewHistory = j["analysisReviewHistory"].Exists && j["analysisReviewHistory"].B;
                 // 위 배율 환산과 같은 이유로 '판을 모르면 옛것' 으로 단정하지 않는다.
                 // 그러지 않으면 version 줄을 지운 설정에서 Spark 자동 갱신이 켤 때마다 꺼지고,
                 // 그 0 이 그대로 저장돼 설정이 지워진다.
@@ -1071,6 +1085,7 @@ namespace DeskWidget
                 var sb = new StringBuilder(512);
                 sb.Append("{\n");
                 Str(sb, "analysisModel", DollarSpark.ModelId(AnalysisModel)); sb.Append(",\n");
+                sb.Append("\"analysisReviewHistory\": ").Append(AnalysisReviewHistory ? "true" : "false").Append(",\n");
                 Str(sb, "version", AppVersion); sb.Append(",\n");
                 Str(sb, "ecosKey", EcosKey); sb.Append(",\n");
                 // lat/lon/city/weatherAreaCode 는 첫 실행 때 위치를 자동 감지해 담아두는 자리다.

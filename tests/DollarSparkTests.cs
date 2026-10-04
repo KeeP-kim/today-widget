@@ -1,5 +1,7 @@
+using TextBlock = DeskWidget.KoreanTextBlock;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -71,10 +73,96 @@ namespace DeskWidget
             Check(Json.Parse(invalid).IsObject && !invalid.Contains("NaN") && !invalid.Contains("Infinity"), "nonfinite price corrupted input JSON");
         }
 
+        private static DollarNews MarketArticle(string title, string id, DateTime time, string publisher = "Fixture publisher")
+        { return new DollarNews { Title = title, Source = publisher, PublishedUtc = time, Url = "https://news.google.com/articles/market-" + id }; }
+
+        private static string MarketResponse(PredictionTarget target, string evidence, int score = 30, string confidence = "high")
+        {
+            return "{\"target_key\":\"" + Json.Escape(target.Key) + "\",\"style\":\"basic\",\"periods\":[" +
+                string.Join(",", new[] { 1, 5, 20 }.Select(h => "{\"horizon\":" + h + ",\"news_score\":" + score +
+                ",\"history_score\":0,\"value_change\":null,\"reason\":\"결제망 변화와 자금 이동 경로\",\"counter\":\"새 정정 보도 확인\",\"change\":\"운영 재개와 잔여 영향 확인\",\"confidence\":\"" + confidence + "\",\"evidence\":[" + evidence + "]}")) + "]}";
+        }
+
+        private static string MarketEvidence(List<DollarNews> selected, DollarNews article, string role)
+        { return "{\"article_id\":" + (selected.IndexOf(article) + 1) + ",\"quote_id\":1,\"role\":\"" + role + "\"}"; }
+
+        private static void MarketNewsChecks()
+        {
+            var now = new DateTime(2026, 9, 24, 3, 0, 0, DateTimeKind.Utc);
+            var target = new PredictionTarget(new SymbolDef(SourceKind.Coin, "KRW-DOGE", "도지코인"));
+            var source = new DollarAnalysisResult { Target = target };
+            var fresh = MarketArticle("Orbital payment relay interruption restricts settlement", "new", now.AddHours(-1), "Current source");
+            var old = MarketArticle("Old orbital relay fault remains under investigation", "old", now.AddDays(-3), "Background source");
+            source.MarketNews.AddRange(new[] { fresh, old });
+            Check(!PredictionFactors.Relevant(fresh.Title, target), "unknown-event fixture accidentally matches the old keyword allow list");
+            var selected = DollarSpark.SelectNews(source, now);
+            Check(selected.Contains(fresh) && selected.Contains(old), "keyword-free macro event or historical context did not reach coin AI");
+            var input = Json.Parse(DollarSpark.Input(source, selected, now));
+            Check(input["input_policy"].S == DollarSpark.InputPolicy && input["articles"][0]["origin"].S == "market" &&
+                input["articles"][0]["temporal_role"].S == "current" && input["articles"][0]["age_hours"].D == 1 &&
+                input["articles"][0]["url"].S == fresh.Url && input["articles"][0]["source"].S == fresh.Source,
+                "current broad article provenance or temporal metadata lost");
+            Check(input["articles"][1]["temporal_role"].S == "background" && input["articles"][1]["allowed_citation_roles"].Count == 1 &&
+                input["articles"][1]["allowed_citation_roles"][0].S == "context", "old article offered as current directional evidence");
+            string evidence = MarketEvidence(selected, fresh, "support") + "," + MarketEvidence(selected, old, "context");
+            var parsed = DollarSpark.Parse(MarketResponse(target, evidence), source, selected, now);
+            Check(parsed.SubmittedNews.SequenceEqual(selected) && parsed.Periods.All(p => p.Citations.Count == 2 && p.Confidence == "low"),
+                "exact AI input order lost or unsupported persistence kept high confidence");
+            source.Spark = parsed;
+            Check(DollarAnalysis.Score(source, 1, now).IsAi, "accepted cross-asset and background citations discarded by scoring");
+            foreach (string role in new[] { "support", "counter", "mixed" })
+                Reject(() => DollarSpark.Parse(MarketResponse(target, MarketEvidence(selected, fresh, "support") + "," + MarketEvidence(selected, old, role)), source, selected, now),
+                    "background article accepted as " + role);
+            Reject(() => DollarSpark.Parse(MarketResponse(target, MarketEvidence(selected, old, "context"), 0), source, selected, now), "older-only citations accepted");
+            Reject(() => DollarSpark.Parse(MarketResponse(target, MarketEvidence(selected, fresh, "context")), source, selected, now), "current context alone fabricated nonzero direction");
+            var neutral = DollarSpark.Parse(MarketResponse(target, MarketEvidence(selected, fresh, "context"), 0), source, selected, now);
+            Check(neutral.Periods.All(p => p.Confidence == "low"), "current context alone kept high confidence");
+            var injected = MarketArticle("Injected detached article with valid-looking source", "injected", now);
+            Reject(() => DollarSpark.Parse(MarketResponse(target, "{\"article_id\":1,\"quote_id\":1,\"role\":\"support\"}"), source, new List<DollarNews> { injected }, now), "detached article admitted as broad evidence");
+            Reject(() => DollarSpark.Input(source, new List<DollarNews> { injected }, now), "detached article sent to model input");
+            var foreign = MarketArticle("Other asset bound event", "foreign", now); foreign.Target = new PredictionTarget(null);
+            var future = MarketArticle("Future event reporting", "future", now.AddTicks(1));
+            var expired = MarketArticle("Expired event reporting", "expired", now.AddDays(-7).AddTicks(-1));
+            var boundary = MarketArticle("Seven-day event background", "boundary", now.AddDays(-7));
+            var dailyBoundary = MarketArticle("Current day boundary report", "dailyboundary", now.AddHours(-24));
+            source.MarketNews.AddRange(new[] { foreign, future, expired, boundary, dailyBoundary });
+            selected = DollarSpark.SelectNews(source, now);
+            Check(selected.Contains(boundary) && selected.Contains(dailyBoundary) && DollarSpark.IsCurrent(dailyBoundary, now) &&
+                !selected.Contains(foreign) && !selected.Contains(future) && !selected.Contains(expired), "cross-asset identity or precise time boundaries incorrect");
+            foreach (var invalid in new[] { foreign, future, expired })
+                Reject(() => DollarSpark.Parse(MarketResponse(target, "{\"article_id\":1,\"quote_id\":1,\"role\":\"context\"}", 0), source, new List<DollarNews> { invalid }, now), "invalid background input accepted");
+            var oldTarget = MarketArticle("Old target-only story", "old-target", now.AddHours(-25)); oldTarget.Target = target; source.News.Add(oldTarget);
+            Check(!DollarSpark.SelectNews(source, now).Contains(oldTarget), "target stream silently widened to old basic articles");
+
+            var crowded = new DollarAnalysisResult { Target = target };
+            for (int i = 0; i < 160; i++) {
+                var article = MarketArticle("Target article number " + i, "target" + i, now.AddMinutes(-i), "Target publisher");
+                article.Target = target; crowded.News.Add(article);
+            }
+            for (int i = 0; i < 60; i++) crowded.MarketNews.Add(MarketArticle("New broad event number " + i, "broad" + i, now.AddMinutes(-i), i == 59 ? "Rare current source" : "Broad publisher"));
+            for (int i = 0; i < 40; i++) crowded.MarketNews.Add(MarketArticle("Prior broad event number " + i, "prior" + i, now.AddDays(-2).AddMinutes(-i), i == 39 ? "Rare background source" : "Prior publisher"));
+            selected = DollarSpark.SelectNews(crowded, now);
+            Check(selected.Count == 100 && selected.Count(n => !DollarSpark.IsCurrent(n, now)) == 20 &&
+                selected.Count(n => DollarSpark.IsCurrent(n, now) && crowded.MarketNews.Contains(n)) == 35 && selected.Count(crowded.News.Contains) == 45,
+                "target mass crowded out fresh discovery or older context reservations");
+            Check(selected.Any(n => n.Source == "Rare current source") && selected.Any(n => n.Source == "Rare background source"), "publisher diversity lost within reservations");
+            var dedup = new DollarAnalysisResult { Target = target };
+            var original = MarketArticle("Identical wire event - Publisher One", "wire-a", now.AddHours(-1), "Publisher One");
+            var duplicate = MarketArticle("Identical wire event - Publisher Two", "wire-b", now.AddHours(-1), "Publisher Two"); duplicate.BodyRead = true;
+            var sameUrl = MarketArticle("Updated headline for same wire event", "wire-b", now.AddMinutes(-30), "Publisher Two");
+            dedup.MarketNews.AddRange(new[] { original, duplicate, sameUrl });
+            var one = DollarSpark.SelectNews(dedup, now);
+            Check(one.Count == 1 && one[0] == sameUrl, "duplicate titles or URLs counted independently or stale copy won");
+            Check(DollarSpark.BuildPrompt(source, DollarSpark.SelectNews(source, now), now).Contains(DollarSpark.EventInstructions) &&
+                DollarSpark.Arguments("test").Contains("web_search=disabled"), "event discovery bypassed secure no-tools instructions");
+            Check(DollarSpark.AnalysisError(new InvalidDataException("최신 인용 근거 누락")).Contains("최신 인용 근거 누락"), "safe temporal validation error hidden");
+        }
+
         internal static int Run(string work)
         {
             count = 0; DateTime now = DateTime.UtcNow;
             MarketSnapshotChecks();
+            MarketNewsChecks();
             var source = new DollarAnalysisResult { CheckedUtc = now, DomesticAvailable = true, GlobalAvailable = true };
             source.News.Add(new DollarNews { Title = "Federal Reserve raises interest rates", Source = "BBC", PublishedUtc = now,
                 Url = "https://news.google.com/articles/spark1" });
@@ -140,13 +228,13 @@ namespace DeskWidget
                 System.Text.RegularExpressions.Regex.Replace(DollarSpark.SourceText(source.News[0]), @"\s+", " ").Trim() && input["articles"].Count == 2,
                 "hostile news escaped JSON data boundary");
             string args = DollarSpark.Arguments(Path.Combine(work, "spark task"));
-            Check(args.Contains("--model gpt-5.6-luna") && args.Contains("--ignore-user-config") && args.Contains("--sandbox read-only") &&
-                args.Contains("features.shell_tool=false") && args.Contains("features.multi_agent=false") && !args.Contains("agents.enabled=") && !args.Contains("Get-Content"), "Luna CLI permissions or fixed model changed");
+            Check(args.Contains("--model gpt-6.1-sol") && args.Contains("--ignore-user-config") && args.Contains("--sandbox read-only") &&
+                args.Contains("features.shell_tool=false") && args.Contains("features.multi_agent=false") && !args.Contains("agents.enabled=") && !args.Contains("Get-Content"), "Sol CLI permissions or fixed model changed");
             Check(DollarSpark.FailureMessage(1, "Error loading config.toml: invalid type: boolean `false`, expected struct AgentRoleToml in agents").Contains("실행 옵션 오류"), "CLI configuration error misreported as login or quota");
             Check(DollarSpark.FailureMessage(2, "unexpected argument '--obsolete'").Contains("실행 옵션 오류"), "unsupported CLI option not explained");
             Check(DollarSpark.FailureMessage(1, "invalid_json_schema: response format").Contains("응답 형식 오류"), "schema error misreported");
             Check(DollarSpark.FailureMessage(1, "usage_limit_reached").Contains("한도 초과"), "quota error misreported");
-            Check(DollarSpark.FailureMessage(1, "The model is not supported when using Codex with a ChatGPT account").Contains("모델 사용 불가"), "unsupported Luna model misreported");
+            Check(DollarSpark.FailureMessage(1, "The model is not supported when using Codex with a ChatGPT account").Contains("모델 사용 불가"), "unsupported Sol model misreported");
             Check(DollarSpark.FailureMessage(1, "401 unauthorized").Contains("인증 오류"), "authentication error misreported");
             Check(DollarSpark.FailureMessage(1, "certificate verify failed").Contains("보안 연결 오류"), "TLS failure misreported");
             Check(DollarSpark.FailureMessage(1, "error sending request for url").Contains("서버 연결 실패"), "network failure misreported");
@@ -257,10 +345,11 @@ namespace DeskWidget
         }
 
         // 명시적으로 spark-live를 선택할 때만 실제 Spark 한도를 사용하는 통합 검사다.
-        internal static int Live(string work, string model = DollarSpark.Model)
+        internal static int Live(string work, string model = DollarSpark.Model, bool extreme = false)
         {
             count = 0; DateTime now = DateTime.UtcNow;
-            var source = new DollarAnalysisResult { CheckedUtc = now, DomesticAvailable = true, GlobalAvailable = true,
+            string expectedModel = DollarSpark.ModelId(model);
+            var source = new DollarAnalysisResult { CheckedUtc = now, Extreme = extreme, DomesticAvailable = true, GlobalAvailable = true,
                 Quote = new Quote { Ok = true, Price = "1,345.90", Value = 1345.90, Unit = "원", Source = "연결 검사 가상 시세" } };
             source.News.Add(new DollarNews { Title = "연결 검사 가상 기사: 미국 기준금리 인상으로 한미 금리차 확대",
                 Context = "실제 뉴스가 아닌 기능 검사 자료입니다. 미국 기준금리가 0.25%p 인상되고 한국 기준금리는 유지되는 가정입니다.",
@@ -268,15 +357,61 @@ namespace DeskWidget
             source.News.Add(new DollarNews { Title = "연결 검사 가상 기사: 한국 수출 증가와 외국인 주식 순매수",
                 Context = "실제 뉴스가 아닌 기능 검사 자료입니다. 한국 수출 대금 유입과 외국인 국내 주식 순매수가 달러 공급을 늘리는 가정입니다.",
                 Source = "기능 검사 자료", PublishedUtc = now, Url = "https://news.google.com/articles/onuln-test-two" });
-            source.Spark = DollarSpark.AnalyzeAsync(source, CancellationToken.None, model).GetAwaiter().GetResult();
+            var elapsed = Stopwatch.StartNew();
+            try { source.Spark = DollarSpark.AnalyzeAsync(source, CancellationToken.None, model).GetAwaiter().GetResult(); }
+            finally {
+                elapsed.Stop();
+                Console.WriteLine("LIVE TIMING: " + expectedModel + " synthetic " + (extreme ? "extreme" : "basic") +
+                    ", analysis " + elapsed.Elapsed.TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " seconds");
+            }
             Check(source.Spark != null && source.Spark.Periods.Count == 3, "live Spark failed to return three periods");
+            Check(source.Spark.ModelId == expectedModel && source.Spark.Extreme == extreme, "live response recorded the wrong requested model or style");
             foreach (int horizon in new[] { 1, 5, 20 })
                 Check(DollarAnalysis.Score(source, horizon, DateTime.UtcNow).IsAi, "live Spark period rejected after response validation");
-            Console.WriteLine("LIVE: " + DollarSpark.Model + " synthetic fixture, three periods and exact citations validated");
+            Console.WriteLine("LIVE: " + expectedModel + " synthetic " + (extreme ? "extreme" : "basic") + " fixture, three periods and exact citations validated");
             return count;
         }
 
-        internal static int LiveDoge(string work)
+        // Opt-in reproduction with the real public-news volume. It never records a forecast or publishes results.
+        internal static int LiveDollarSol(string work, string expectedModel = DollarSpark.Model)
+        {
+            count = 0;
+            DollarAnalysisResult source;
+            var elapsed = Stopwatch.StartNew();
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(80)))
+                source = DollarAnalysis.FetchAsync("HANA", timeout.Token).GetAwaiter().GetResult();
+            elapsed.Stop();
+            source.Extreme = true;
+            DateTime now = DateTime.UtcNow;
+            var selected = DollarSpark.SelectNews(source, now);
+            Console.WriteLine(expectedModel + " USD/KRW EXTREME: " + selected.Count + "/100 public articles, " +
+                selected.Count(n => DollarSpark.IsCurrent(n, now)) + " current, " + selected.Count(n => !DollarSpark.IsCurrent(n, now)) +
+                " background, " + selected.Count(n => n.BodyRead) + " body excerpts, " + source.Rates.Count + " history points; fetch " +
+                elapsed.Elapsed.TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " seconds");
+            Check(selected.Count > 0 && selected.Count <= 100 && selected.Any(n => DollarSpark.IsCurrent(n, now)),
+                "live selected-model FX reproduction has no current evidence or exceeds the submission bound");
+            elapsed.Restart();
+            try { source.Spark = DollarSpark.AnalyzeAsync(source, CancellationToken.None, expectedModel).GetAwaiter().GetResult(); }
+            finally {
+                elapsed.Stop();
+                Console.WriteLine("LIVE TIMING: " + expectedModel + " public USD/KRW extreme, analysis " +
+                    elapsed.Elapsed.TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " seconds");
+            }
+            Check(source.Spark != null && source.Spark.Periods.Count == 3 && source.Spark.TargetKey == source.Target.Key &&
+                source.Spark.Extreme && source.Spark.ModelId == expectedModel, "live selected-model FX returned the wrong target, model, style or period count");
+            foreach (int horizon in new[] { 1, 5, 20 })
+                Check(DollarAnalysis.Score(source, horizon, DateTime.UtcNow).IsAi, "live selected-model FX period failed final citation validation");
+            Console.WriteLine("LIVE: " + source.Spark.ModelId + " public USD/KRW extreme, all three periods validated; no forecast record published");
+            Check(source.Spark.FeedbackSnapshot == "null", "public-only integration submitted private prediction history");
+            Check(source.Spark.PolicySnapshot == PolicyContext.Input(source.Target, source.Spark.CheckedUtc), "live analysis omitted the captured public policy/calendar context");
+            string path = Path.Combine(work, "PUBLIC-POLICY-RESPONSE.md");
+            File.WriteAllText(path, "# Public-only model response\n\nModel: " + source.Spark.ModelId + "; private prediction_review: null\n\n" +
+                string.Join("\n\n", source.Spark.Periods.Select(p => "## Horizon " + p.Horizon + "\n\n" + p.Reason + "\n\nCounter: " + p.Counter + "\n\nChange: " + p.Change)), new System.Text.UTF8Encoding(false));
+            Console.WriteLine("PUBLIC RESPONSE: " + path);
+            return count;
+        }
+
+        internal static int LiveDoge(string work, string model = DollarSpark.Model)
         {
             count = 0;
             var target = new PredictionTarget(new SymbolDef(SourceKind.Coin, "KRW-DOGE", "도지코인"));
@@ -287,11 +422,37 @@ namespace DeskWidget
             int articles = DollarSpark.SelectNews(source, DateTime.UtcNow).Count;
             Console.WriteLine("DOGE EXTREME: " + articles + " public articles, " + source.Rates.Count + " history points");
             Check(articles > 0, "live DOGE has no news for reproduction");
-            source.Spark = DollarSpark.AnalyzeAsync(source, CancellationToken.None).GetAwaiter().GetResult();
+            source.Spark = DollarSpark.AnalyzeAsync(source, CancellationToken.None, model).GetAwaiter().GetResult();
             Check(source.Spark.TargetKey == target.Key && source.Spark.Extreme, "live DOGE result has wrong target or style");
             foreach (int h in new[] { 1, 5, 20 })
                 Check(DollarAnalysis.Score(source, h, DateTime.UtcNow).IsAi, "live DOGE response fails final validation");
             Console.WriteLine("LIVE: DOGE extreme, current public news, all periods validated");
+            return count;
+        }
+
+        // Explicit opt-in only: synthetic events, no live market claim and no forecast-accuracy claim.
+        internal static int LiveMarket(string work, string model = DollarSpark.Model)
+        {
+            count = 0; DateTime now = DateTime.UtcNow;
+            var target = new PredictionTarget(new SymbolDef(SourceKind.Coin, "KRW-DOGE", "도지코인"));
+            var source = new DollarAnalysisResult { Target = target, CheckedUtc = now };
+            var old = MarketArticle("가상 릴레이 결제망 중단 조사 착수", "live-old", now.AddDays(-3), "가상 운영사 과거 공지");
+            old.Context = "실제 뉴스가 아닌 합성 기능 검사다. 디지털자산 거래소 공통 결제망 릴레이가 중단되어 출금과 정산이 지연됐다는 3일 전 가정이다. 오늘도 계속 중단됐다는 증거가 아니다.";
+            var recovery = MarketArticle("가상 릴레이 정산 정상화 완료 공지", "live-new", now.AddMinutes(-20), "가상 운영사 최신 공지");
+            recovery.Context = "실제 뉴스가 아닌 합성 기능 검사다. 3일 전 중단된 디지털자산 거래소 공통 결제망 릴레이가 오늘 복구되어 입출금과 정산이 정상화됐다는 최신 가정이다. 과거 중단 보도는 현재 상태를 나타내지 않는다. 시장 가격 반응이나 자금 유입 수치는 제공되지 않았다.";
+            var verification = MarketArticle("가상 릴레이 잔여 지연 해소 확인", "live-check", now.AddMinutes(-10), "가상 독립 관측자");
+            verification.Context = "실제 뉴스가 아닌 합성 기능 검사다. 별도 관측자가 오늘 결제망 복구와 잔여 정산 지연 해소를 직접 확인한 가정이다. 과거 중단은 해결됐으나 신뢰 회복 기간과 향후 재발 가능성은 관측하지 못했다. 거래량이나 포지션 수치는 없다.";
+            source.MarketNews.AddRange(new[] { old, recovery, verification });
+            Check(!PredictionFactors.Relevant(recovery.Title, target) && DollarSpark.SelectNews(source, now).Count == 3,
+                "live unfamiliar-event fixture does not exercise broad discovery");
+            source.Spark = DollarSpark.AnalyzeAsync(source, CancellationToken.None, model).GetAwaiter().GetResult();
+            foreach (var period in source.Spark.Periods) {
+                Check(period.Citations.Any(c => c.News == recovery || c.News == verification), "live response omitted latest resolution of the earlier event");
+                Check(period.Citations.Where(c => c.News == old).All(c => c.Role == "context"), "live old disruption used as a current shock");
+                Check(DollarAnalysis.Score(source, period.Horizon, DateTime.UtcNow).IsAi, "live broad-event result discarded at scoring boundary");
+            }
+            Check(source.Spark.SubmittedNews.SequenceEqual(DollarSpark.SelectNews(source, now)), "live source order not preserved for audit");
+            Console.WriteLine("LIVE: synthetic unfamiliar event, fresh reversal and background citation roles validated; forecast accuracy untested");
             return count;
         }
 

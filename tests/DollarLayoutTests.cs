@@ -1,3 +1,4 @@
+using TextBlock = DeskWidget.KoreanTextBlock;
 using System;
 using System.Globalization;
 using System.IO;
@@ -94,6 +95,7 @@ namespace DeskWidget
             window.Render(null);
             Check(Field<TextBlock[]>(window, "_forecastChanges").All(c => c.Text == "—\n—") && points.All(p => p.Text == "—점"), "failed refresh retained delta or score");
             window.Close();
+            MarketContextChecks(work, preview);
             LoginChecks(work, preview);
             SparkScheduleChecks(work);
             SparkModeChecks(work, preview);
@@ -141,16 +143,13 @@ namespace DeskWidget
                 Check(!window.IsLoaded, "login test showed a native window");
                 if (preview) Save(body, work, "spark-connected-" + (int)width + ".png", width, 820);
             }
-            window.ChangeModel("gpt-6-astra");
             window.Width = 340; body.Measure(new Size(340,820)); body.Arrange(new Rect(0,0,340,820)); body.UpdateLayout();
             var modelLabel = Field<TextBlock>(window, "_sparkLabel");
-            Check(modelLabel.Text == "Astra · High ▾", "Astra effort not displayed after swap");
-            var astraHelp = Field<Button>(window, "_sparkHelp"); var astraTimer = Field<Button>(window, "_sparkCountdown");
-            Check(astraHelp.TranslatePoint(new Point(astraHelp.ActualWidth,0), body).X <= astraTimer.TranslatePoint(new Point(),body).X,
-                "Astra effort label overlaps timer");
-            if (preview) Save(body, work, "astra-high-340.png", 340, 820);
-            window.ChangeModel(DollarSpark.Model);
-            Check(modelLabel.Text == "Luna · High ▾", "Luna effort lost after swap");
+            Check(modelLabel.Text == "Sol 6.1 · High" && modelLabel.ContextMenu == null, "fixed Sol effort label retained model menu");
+            var solHelp = Field<Button>(window, "_sparkHelp"); var solTimer = Field<Button>(window, "_sparkCountdown");
+            Check(solHelp.TranslatePoint(new Point(solHelp.ActualWidth,0), body).X <= solTimer.TranslatePoint(new Point(),body).X,
+                "Sol effort label overlaps timer");
+            if (preview) Save(body, work, "sol-high-340.png", 340, 820);
             Field<Button>(window, "_sparkLogin").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Check(!Field<bool>(window, "_sparkConnected") && !Field<DispatcherTimer>(window, "_sparkTimer").IsEnabled && loggedIn, "disconnect kept automatic analysis or logged out global CLI");
             window.Close();
@@ -291,6 +290,41 @@ namespace DeskWidget
             Field<ToggleButton>(logging, "_analysisMode").IsChecked = false; login.SetResult(0); active.GetAwaiter().GetResult();
             Check(loginToken.IsCancellationRequested && loginProbes == 1 && !Field<bool>(logging, "_sparkConnected"), "basic switch failed to cancel pending login");
             logging.Close();
+        }
+
+        private static void MarketContextChecks(string work, bool preview)
+        {
+            var result = Sample(); DateTime now = DateTime.UtcNow;
+            result.Extreme = true; result.Spark.Extreme = true;
+            result.MarketNewsFeedsExpected = 8;
+            var fresh = new DollarNews { Title = "Unexpected clearing interruption resolved", Source = "Fixture",
+                Url = "https://news.google.com/articles/market-layout-fresh", PublishedUtc = now.AddHours(-1) };
+            var background = new DollarNews { Title = "Earlier clearing interruption reported", Source = "Fixture",
+                Url = "https://news.google.com/articles/market-layout-old", PublishedUtc = now.AddDays(-3) };
+            result.MarketNews.Add(fresh); result.MarketNews.Add(background);
+            foreach (var period in result.Spark.Periods) {
+                period.Citations.Clear();
+                period.Citations.Add(new DollarSparkCitation { News = fresh, Quote = fresh.Title, Role = "support" });
+                period.Citations.Add(new DollarSparkCitation { News = background, Quote = background.Title, Role = "context" });
+            }
+            var window = new DollarAnalysisWindow(new Config(Path.Combine(work, "market-layout.json")), ct => Task.FromResult(result), ct => Task.FromResult(true), ct => Task.FromResult(0));
+            Field<ToggleButton>(window, "_analysisMode").IsChecked = true;
+            window.Render(result);
+            Check(Field<TextBlock[]>(window, "_periodPoints")[0].Text == "+2.3점", "market citations were dropped between scoring and rendering");
+            Check(Field<TextBlock>(window, "_newsInfo").Text.Contains("최근 24시간 1건 · 이전 7일 내 배경 1건"), "market source age not shown");
+            Check(Field<TextBlock>(window, "_status").Text.Contains("시장 뉴스 갱신 실패"), "cache-only results presented as a successful fresh fetch");
+            if (preview) {
+                var coverage = Field<TextBlock>(window, "_newsInfo");
+                ((Panel)coverage.Parent).Children.Remove(coverage);
+                var expander = Field<Expander[]>(window, "_periodEvidence")[0];
+                var evidence = (FrameworkElement)expander.Content; expander.Content = null;
+                var details = new StackPanel { Margin = new Thickness(12) };
+                details.Children.Add(coverage); details.Children.Add(evidence);
+                var previewRoot = new Border { Background = new SolidColorBrush(Color.FromRgb(20, 23, 30)), Child = details };
+                previewRoot.Measure(new Size(400, 700)); previewRoot.Arrange(new Rect(0, 0, 400, 700)); previewRoot.UpdateLayout();
+                Save(previewRoot, work, "market-context-details.png", 400, 700);
+            }
+            window.Close();
         }
 
         private static DollarSparkResult SparkFor(DollarAnalysisResult result)

@@ -9,6 +9,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $FW   = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
@@ -33,8 +35,8 @@ if (-not $CI -and -not $AnalysisOnly) {
 $sources = @(
     'AssemblyInfo', 'Program', 'Config', 'Json', 'Net', 'Sources', 'Icons', 'Theme', 'Dock',
     'Apps', 'PanelWindow', 'AppPickWindow', 'AboutWindow', 'SearchWindow', 'WidgetWindow',
-    'DollarAnalysis', 'DollarFactors', 'DollarNewsSources', 'DollarSpark', 'DollarAnalysisStyles', 'DollarAnalysisWindow', 'DollarProgram',
-    'PredictionTarget', 'PredictionData', 'PredictionFactors', 'PredictionJournal', 'BriefTextBlock', 'ProbabilityCalibration', 'RuleSkill'
+    'DollarAnalysis', 'DollarFactors', 'DollarNewsSources', 'MarketNewsContext', 'PolicyContext', 'ModelComparison', 'DollarSpark', 'DollarAnalysisStyles', 'DollarAnalysisWindow', 'DollarProgram',
+    'PredictionTarget', 'PredictionData', 'PredictionFactors', 'PredictionJournal', 'ForecastReview', 'BriefTextBlock', 'KoreanTextBlock', 'ProbabilityCalibration', 'RuleSkill'
 ) | ForEach-Object { Join-Path $root "src\$_.cs" }
 
 $refs = @(

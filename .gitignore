@@ -9,6 +9,7 @@
 config.json
 config.json*
 dollar-analysis.json*
+market-news-context.xml*
 
 # ── 빌드 산출물 ───────────────────────────────────────
 # 바이너리는 저장소에 두지 않는다.
@@ -54,6 +55,7 @@ update-worker/
 # 규칙 없이 두면 `git add -A` 한 번에 11개가 통째로 잡힌다 - 실측했다.
 # config.json.bak- 때와 같은 부류다. 주의력이 아니라 그물로 막는다.
 prediction-history/
+analysis-runs/
 
 # 즐겨찾기 보관소 - 개인 바로가기다. 올리지 않는다.
 앱저장/

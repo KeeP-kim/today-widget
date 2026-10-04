@@ -101,6 +101,10 @@ namespace DeskWidget
 
     internal sealed class DollarPattern
     {
+        internal DollarPattern Snapshot()
+        {
+            var copy = (DollarPattern)MemberwiseClone(); copy.Returns = Returns.ToList(); return copy;
+        }
         public int Horizon = 1;
         public int Up, Flat, Down;
         public int Count { get { return Up + Flat + Down; } }
@@ -185,9 +189,14 @@ namespace DeskWidget
         public DollarPattern Pattern;
         public List<DollarPattern> Patterns = new List<DollarPattern>();
         public List<DollarNews> News = new List<DollarNews>();
+        // Broad, dated context is AI evidence only; it never changes the basic rule inputs.
+        public List<DollarNews> MarketNews = new List<DollarNews>();
+        public int MarketNewsFeedsAvailable, MarketNewsFeedsExpected;
         public bool DomesticAvailable, GlobalAvailable;
         public int TopicFeedsAvailable, TopicFeedsExpected;
         public DollarSparkResult Spark;
+        internal List<DollarSparkResult> ComparisonResults = new List<DollarSparkResult>();
+        internal string ComparisonInputId;
         public string SparkStatus;
         public bool Extreme;
         /// <summary>이 품목의 왕복 거래비용(%). 설정에서 넣어 준다. 0 이면 문턱은 종전대로다.</summary>
@@ -198,13 +207,14 @@ namespace DeskWidget
         {
             var copy = (DollarAnalysisResult)MemberwiseClone();
             copy.Quote = Quote == null ? null : Quote.Snapshot();
-            copy.News = News.ToList(); copy.Rates = Rates.ToList(); copy.Patterns = Patterns.ToList();
+            copy.News = News.ToList(); copy.MarketNews = MarketNews.ToList(); copy.Rates = Rates.ToList(); copy.Patterns = Patterns.ToList();
             return copy;
         }
         internal DollarAnalysisResult ForStyle(bool extreme)
         {
             var copy = (DollarAnalysisResult)MemberwiseClone();
             copy.Extreme = extreme; copy.Spark = null; copy.SparkStatus = null;
+            copy.ComparisonResults = new List<DollarSparkResult>(); copy.ComparisonInputId = null;
             return copy;
         }
     }
@@ -250,7 +260,8 @@ namespace DeskWidget
             var topicTasks = topicQueries.Select(q => Net.GetTextAsync("https://news.google.com/rss/search?q=" +
                 Uri.EscapeDataString(q + " when:1d") + "&hl=ko&gl=KR&ceid=KR:ko", ct)).ToArray();
             var directTasks = DollarNewsSources.Feeds.Select(url => Net.GetTextAsync(url, ct)).ToArray();
-            await Task.WhenAll(new Task[] { quoteTask, historyTask, strengthTask, domesticTask, globalTask }.Concat(yieldTasks).Concat(topicTasks).Concat(directTasks));
+            var marketTasks = MarketNewsContext.StartSearches(ct);
+            await Task.WhenAll(new Task[] { quoteTask, historyTask, strengthTask, domesticTask, globalTask }.Concat(yieldTasks).Concat(topicTasks).Concat(directTasks).Concat(marketTasks));
             ct.ThrowIfCancellationRequested();
             var result = new DollarAnalysisResult { CheckedUtc = DateTime.UtcNow, Quote = quoteTask.Result };
             result.Rates = ParseRates(historyTask.Result, today);
@@ -291,6 +302,7 @@ namespace DeskWidget
                 .GroupBy(n => Regex.Replace(n.Title.Split(new[] { " - " }, StringSplitOptions.None)[0], "[^\\p{L}\\p{N}]", "").ToLowerInvariant())
                 .Select(g => g.First()).ToList();
             await DollarNewsSources.EnrichAsync(result.News, ct);
+            await MarketNewsContext.CompleteAsync(result, directTasks.Select(t => t.Result).ToArray(), marketTasks.Select(t => t.Result).ToArray(), now, ct);
             ct.ThrowIfCancellationRequested();
             return result;
         }
@@ -600,8 +612,10 @@ namespace DeskWidget
             var score = new DollarScore();
             if (result == null) return score;
             var ai = result.Spark == null || result.Spark.TargetKey != result.Target.Key || result.Spark.Extreme != result.Extreme || result.Spark.CheckedUtc > nowUtc ||
-                (nowUtc - result.Spark.CheckedUtc).TotalHours > 24 || result.Spark.Periods.Any(p => p.Citations.Any(c =>
-                    !result.News.Contains(c.News) || !ForTarget(c.News, result.Target) || c.News.PublishedUtc > nowUtc || c.News.PublishedUtc < nowUtc.AddHours(-24)))
+                (nowUtc - result.Spark.CheckedUtc).TotalHours > 24 || result.Spark.Periods.Any(p =>
+                    !p.Citations.Any(c => DollarSpark.IsCurrent(c.News, nowUtc)) ||
+                    p.NewsScore != 0 && !p.Citations.Any(c => DollarSpark.IsCurrent(c.News, nowUtc) && (c.Role == "support" || c.Role == "counter" || c.Role == "mixed")) ||
+                    p.Citations.Any(c => !DollarSpark.EligibleNews(result, c.News, nowUtc) || !DollarSpark.IsCurrent(c.News, nowUtc) && c.Role != "context"))
                 ? null : result.Spark.Periods.FirstOrDefault(p => p.Horizon == horizon);
             if (ai != null)
             {
@@ -781,7 +795,7 @@ namespace DeskWidget
                  parsed.AbsolutePath.StartsWith("/articles/", StringComparison.Ordinal));
         }
 
-        public static List<DollarNews> ParseNews(string text, bool domestic, DateTime nowUtc, string publisher = null, PredictionTarget target = null)
+        public static List<DollarNews> ParseNews(string text, bool domestic, DateTime nowUtc, string publisher = null, PredictionTarget target = null, bool marketContext = false)
         {
             if (string.IsNullOrEmpty(text) || text.Length > 2 * 1024 * 1024) return null;
             try
@@ -795,25 +809,27 @@ namespace DeskWidget
                 var news = new List<DollarNews>();
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var links = new HashSet<string>(StringComparer.Ordinal);
+                int inspected = 0;
                 foreach (XmlNode item in doc.SelectNodes("/rss/channel/item"))
                 {
-                    if (news.Count >= 60) break;
+                    if (marketContext ? ++inspected > 500 : news.Count >= 60) break;
                     string title = Clean(NodeText(item, "title"), 240);
                     string url = NodeText(item, "link");
                     DateTimeOffset time;
                     if (title.Length < 8 || !IsNewsLink(url) ||
                         !DateTimeOffset.TryParse(NodeText(item, "pubDate"), CultureInfo.InvariantCulture,
                             DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal, out time)) continue;
-                    if (time.UtcDateTime > nowUtc || time.UtcDateTime < nowUtc.AddHours(-24)) continue;
-                    if (target == null ? !Relevant(title, domestic) : !PredictionFactors.Relevant(title, target)) continue;
+                    if (time.UtcDateTime > nowUtc || time.UtcDateTime < (marketContext ? nowUtc.AddDays(-MarketNewsContext.MaxAgeDays) : nowUtc.AddHours(-24))) continue;
+                    if (!marketContext && (target == null ? !Relevant(title, domestic) : !PredictionFactors.Relevant(title, target))) continue;
                     string key = Regex.Replace(title.Split(new[] { " - " }, StringSplitOptions.None)[0], "[^\\p{L}\\p{N}]", "");
                     if (!seen.Add(key) || !links.Add(url)) continue;
                     var n = new DollarNews { Target = target, Title = title, Url = url, Domestic = domestic,
                         Source = publisher ?? Clean(NodeText(item, "source"), 60), PublishedUtc = time.UtcDateTime,
                         Context = publisher == null ? ContextText(NodeText(item, "description"), title) : Clean(System.Net.WebUtility.HtmlDecode(Regex.Replace(NodeText(item, "description"), "<[^>]*>", " ")), 1800) };
-                    Classify(n);
-                    news.Add(n);
+                    if (!marketContext) Classify(n);
+                    if (!DollarNewsSources.Promotional(n)) news.Add(n);
                 }
+                if (marketContext) return news.OrderByDescending(n => n.PublishedUtc).Take(24).ToList();
                 return news.OrderBy(n => NewsPriority(n.Source)).ThenByDescending(n => n.PublishedUtc).Take(publisher == null ? 6 : 12).ToList();
             }
             catch { return null; }

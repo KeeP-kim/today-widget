@@ -1,5 +1,7 @@
-﻿param([string]$Suite = 'all', [string]$SourceRoot = '')
+﻿param([string]$Suite = 'all', [string]$SourceRoot = '', [switch]$ForceDll)
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $SourceRoot) { $SourceRoot = $root }
 $fw = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
@@ -28,12 +30,15 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 #    실제로 그렇게 막혔다. 검사가 안 도는 것과 검사가 실패하는 것은 다른데,
 #    막힌 것을 실패로 읽으면 멀쩡한 코드를 고치려 들게 된다.
 # ---------------------------------------------------------------
-$blocked = $false
-try { & $exe $root $Suite $SourceRoot; $code = $LASTEXITCODE }
-catch { $blocked = $true }
-if (-not $blocked -and $code -eq $null) { $blocked = $true }
+$blocked = [bool]$ForceDll
+if (-not $ForceDll) {
+    try { & $exe $root $Suite $SourceRoot; $code = $LASTEXITCODE }
+    catch { $blocked = $true }
+    if (-not $blocked -and $code -eq $null) { $blocked = $true }
+}
 if ($blocked) {
-    Write-Host '[알림] exe 실행이 막혀 DLL 을 메모리로 올려 돌립니다 (Smart App Control).'
+    if ($ForceDll) { Write-Host '[알림] 지정한 DLL 경로로 검사를 실행합니다.' }
+    else { Write-Host '[알림] exe 실행이 막혀 DLL 을 메모리로 올려 돌립니다 (Smart App Control).' }
     & (Join-Path $fw 'csc.exe') (@('/nologo', '/target:library', '/platform:x64', '/codepage:65001',
         "/out:$dll") + $refs + $sources)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

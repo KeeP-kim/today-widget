@@ -1,6 +1,10 @@
+using TextBlock = DeskWidget.KoreanTextBlock;
 // 본체와 합체하거나 AppBar 자리를 확보하지 않는 독립 달러 분석 창.
 using System;
 using System.Globalization;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -29,15 +33,26 @@ namespace DeskWidget
         private readonly Func<CancellationToken, Task<bool>> _checkLogin;
         private readonly Func<CancellationToken, Task> _login;
         private readonly Func<DollarAnalysisResult, CancellationToken, Task<DollarSparkResult>> _analyze;
+        private readonly bool _injectedAnalysis;
+        private readonly Func<DollarAnalysisResult, CancellationToken, string, Task<DollarSparkResult>> _analyzeModel;
+        private readonly Expander _modelComparison;
+        private readonly TextBlock _modelComparisonInfo;
+        private AnalysisInput _comparisonInput;
+        private readonly List<AnalysisRun> _analysisRuns = new List<AnalysisRun>();
+        private string _activeAnalysisModel, _comparisonNotice;
         private readonly Func<DateTime> _utcNow;
         private readonly DispatcherTimer _sparkTimer;
+        private readonly DispatcherTimer _analysisProgressTimer;
+        private DateTime _analysisStartedAt;
         private bool _sparkConnected;
+        private bool _sparkDisconnectedByUser, _sparkLoginRequired, _checkingSparkLogin, _analyzingSpark;
         private bool _sparkAutoPaused;
         private CancellationTokenSource _refreshCancellation, _loginCancellation;
         private readonly Border _sparkCard;
         private string _model;
         private readonly BriefTextBlock _brief;
         private readonly TextBlock _performance;
+        private readonly StackPanel _policyContextBody;
         private readonly TextBlock _primaryStatus;
         private readonly StackPanel _primaryHost, _forecastPanel, _comparisonBody;
         private readonly ScaleTransform _textScale;
@@ -51,6 +66,7 @@ namespace DeskWidget
         private bool _busy, _closed, _appClosing, _loginBusy;
         private bool _positionedNearOwner;
         private DateTime _lastAttempt = DateTime.MinValue;
+        private bool _hasAiRefreshAttempt;
         private DollarAnalysisResult _lastRendered;
         private readonly DollarAnalysisResult[] _styleResults = new DollarAnalysisResult[2];
         private readonly ToggleButton _analysisMode;
@@ -114,7 +130,8 @@ namespace DeskWidget
 
         internal DollarAnalysisWindow(Config cfg, Func<CancellationToken, Task<DollarAnalysisResult>> fetch,
             Func<CancellationToken, Task<bool>> checkLogin = null, Func<CancellationToken, Task> login = null, PredictionTarget target = null,
-            Func<DollarAnalysisResult, CancellationToken, Task<DollarSparkResult>> analyze = null, Func<DateTime> utcNow = null)
+            Func<DollarAnalysisResult, CancellationToken, Task<DollarSparkResult>> analyze = null, Func<DateTime> utcNow = null,
+            Func<DollarAnalysisResult, CancellationToken, string, Task<DollarSparkResult>> analyzeModel = null)
         {
             _target = target ?? new PredictionTarget(null);
             _cfg = cfg;
@@ -123,10 +140,13 @@ namespace DeskWidget
             _login = login ?? DollarSpark.LoginAsync;
             _model = DollarSpark.ModelId(cfg.AnalysisModel);
             _analyze = analyze ?? ((r, ct) => DollarSpark.AnalyzeAsync(r, ct, _model));
+            _injectedAnalysis = analyze != null; _analyzeModel = analyzeModel;
             _utcNow = utcNow ?? (() => DateTime.UtcNow);
             _sparkInterval = Config.SparkInterval(cfg.SparkRefreshIntervalSec);
             _sparkTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _sparkTimer.Tick += async (s, e) => await SparkTimerTickAsync();
+            _analysisProgressTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _analysisProgressTimer.Tick += (s, e) => UpdateAnalysisProgress();
             Title = "오늘은 - " + _target.Name + " 예측";
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
@@ -165,7 +185,7 @@ namespace DeskWidget
             header.Children.Add(close);
             _refresh = ActionButton("↻ 갱신", 68);
             _refresh.Margin = new Thickness(0, 0, 8, 0);
-            _refresh.Click += async (s, e) => await RefreshAsync();
+            _refresh.Click += async (s, e) => { if (_busy) CancelRefresh(); else await RefreshAsync(); };
             DockPanel.SetDock(_refresh, System.Windows.Controls.Dock.Right);
             header.Children.Add(_refresh);
             _analysisMode = new ToggleButton { Content = "참고", IsChecked = false, Width = 62, Height = 30,
@@ -221,17 +241,8 @@ namespace DeskWidget
             sparkRow.ColumnDefinitions.Add(new ColumnDefinition());
             sparkRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var sparkName = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            _sparkLabel = Label(DollarSpark.ModelLabel(_model) + " ▾", 12, Palette.Text); sparkName.Children.Add(_sparkLabel);
-            _sparkLabel.Cursor = Cursors.Hand;
-            _sparkLabel.ToolTip = "분석 모델 선택 · 추론 강도 High · 변경 후 갱신 버튼으로 실행";
-            _sparkLabel.MouseLeftButtonUp += (s, e) => {
-                var menu = new ContextMenu();
-                foreach (var id in new[] { DollarSpark.Model, "gpt-6-astra" }) {
-                    string chosen = id; var item = new MenuItem { Header = DollarSpark.ModelLabel(id), IsChecked = id == _model };
-                    item.Click += (sender, args) => ChangeModel(chosen); menu.Items.Add(item);
-                }
-                menu.PlacementTarget = _sparkLabel; menu.IsOpen = true;
-            };
+            _sparkLabel = Label(DollarSpark.ModelLabel(_model), 12, Palette.Text); sparkName.Children.Add(_sparkLabel);
+            _sparkLabel.ToolTip = "Sol 6.1 · 추론 강도 High · 최대 5분";
             _sparkDot = new Ellipse { Width = 7, Height = 7, Fill = Palette.TextFaint,
                 Margin = new Thickness(7, 0, 0, 0), ToolTip = "로그인 전", VerticalAlignment = VerticalAlignment.Center };
             sparkName.Children.Add(_sparkDot); sparkRow.Children.Add(sparkName);
@@ -245,6 +256,14 @@ namespace DeskWidget
             Grid.SetColumn(_sparkCountdown, 2); sparkRow.Children.Add(_sparkCountdown);
             _sparkState = Label("로그인하면 첫 분석 · Codex 사용량 소모", 10, Palette.TextDim);
             _sparkState.Margin = new Thickness(0, 2, 0, 0); sparkPanel.Children.Add(_sparkState);
+            var historyReview = new CheckBox { Content = "과거 결과 AI 참고 (선택)", IsChecked = _cfg.AnalysisReviewHistory,
+                FontSize = 10, Foreground = Palette.TextDim, Margin = new Thickness(0, 7, 0, 0), IsEnabled = !_target.Weather,
+                ToolTip = "켜면 다음 분석부터 최근 30일의 검증된 예측·관측·오차·당시 설명을 최대 12건, Sol 6.1 High에 전송합니다. 기본은 꺼짐입니다." };
+            historyReview.Click += (s, e) => {
+                bool previous = _cfg.AnalysisReviewHistory; _cfg.AnalysisReviewHistory = historyReview.IsChecked == true;
+                if (!_cfg.Save()) { _cfg.AnalysisReviewHistory = previous; historyReview.IsChecked = previous; _sparkState.Text = "과거 결과 참고 설정 저장 실패"; }
+            };
+            sparkPanel.Children.Add(historyReview);
             _loginHelp = Label(DollarSpark.LoginHelp + "\n선택한 품목의 공개 기사와 시세 통계를 전송합니다.", 10, Palette.TextDim);
             _loginHelp.Margin = new Thickness(0, 5, 0, 0); _loginHelp.Visibility = Visibility.Collapsed;
             _sparkHelp = new Button { Content = "?", Width = 21, Height = 21, FontSize = 11, Foreground = Palette.TextDim,
@@ -262,6 +281,18 @@ namespace DeskWidget
             _primaryStatus.Margin = new Thickness(0, 8, 0, 6); body.Children.Add(_primaryStatus);
             _performance = Label("예측 성적 · 기록 대기", 10, Palette.TextDim);
             _performance.Margin = new Thickness(0, 6, 0, 8); body.Children.Add(_performance);
+            _policyContextBody = new StackPanel { Margin = new Thickness(6, 6, 6, 10) };
+            var policyContext = new Expander { Header = "정부 정책·예정 일정", Content = _policyContextBody,
+                Template = DollarAnalysisStyles.Disclosure, Foreground = Palette.TextDim,
+                Visibility = _target.Economic || _target.Weather ? Visibility.Collapsed : Visibility.Visible,
+                Margin = new Thickness(0, 4, 0, 8) };
+            policyContext.Expanded += (s, e) => RenderPolicyContext(_utcNow());
+            body.Children.Add(policyContext); RenderPolicyContext(_utcNow());
+            _modelComparisonInfo = Label("분석 실행 기록 · 갱신 후 표시합니다", 10, Palette.TextDim);
+            _modelComparison = new Expander { Header = "분석 실행 기록 · 속도와 실패율", Content = _modelComparisonInfo,
+                Template = DollarAnalysisStyles.Disclosure, Foreground = Palette.TextDim,
+                Visibility = Visibility.Collapsed, Margin = new Thickness(0, 4, 0, 10) };
+            _modelComparison.Expanded += (s, e) => UpdateComparisonInfo(); body.Children.Add(_modelComparison);
             _primaryHost = new StackPanel(); body.Children.Add(_primaryHost);
             _forecastPanel = new StackPanel();
             _comparisonBody = new StackPanel();
@@ -444,6 +475,7 @@ namespace DeskWidget
             {
                 _closed = true;
                 _sparkTimer.Stop();
+                _analysisProgressTimer.Stop();
                 _lifetime.Cancel();
                 if (!double.IsNaN(Left) && !double.IsInfinity(Left)) cfg.DollarX = Left;
                 if (!double.IsNaN(Top) && !double.IsInfinity(Top)) cfg.DollarY = Top;
@@ -466,13 +498,39 @@ namespace DeskWidget
             foreach (var cached in _styleResults.Where(r => r != null)) cached.Quote = quote;
             RenderQuote(quote);
             if (_lastRendered != null) { _lastRendered.Quote = quote; _chart.Children.Clear(); DrawChart(_lastRendered, _utcNow()); }
+            if (_modelComparison.IsExpanded) UpdateComparisonInfo();
+        }
+
+        private void RenderPolicyContext(DateTime now)
+        {
+            if (_policyContextBody == null) return;
+            _policyContextBody.Children.Clear();
+            _policyContextBody.Children.Add(Label(PolicyContext.Summary(now), 10, Palette.TextDim));
+            if (!PolicyContext.Available(now)) return;
+            foreach (var source in PolicyContext.References(now)) {
+                var content = new StackPanel();
+                content.Children.Add(Label(source.Institution + " · 발표 " + source.PublishedDate + " · 배경", 10, Palette.TextDim));
+                content.Children.Add(Label(source.Summary + "  ↗", 10.5, Palette.Text));
+                var link = ActionButton("", double.NaN); link.Content = content; link.Height = double.NaN;
+                link.HorizontalContentAlignment = HorizontalAlignment.Stretch; link.Margin = new Thickness(0, 5, 0, 5);
+                string url = source.Url; link.Click += (s, e) => Net.OpenLink(url); _policyContextBody.Children.Add(link);
+            }
+            _policyContextBody.Children.Add(Label("예정 일정 · 결과·시장 예상치 미제공 · 변경 가능", 11, Palette.TextDim));
+            foreach (var entry in PolicyContext.Upcoming(now)) {
+                var link = ActionButton("", double.NaN); link.Content = Label(entry.Display + "  ↗", 10.5, Palette.Text);
+                link.Height = double.NaN; link.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+                link.Margin = new Thickness(0, 3, 0, 3);
+                string url = entry.Url; link.Click += (s, e) => Net.OpenLink(url); _policyContextBody.Children.Add(link);
+            }
+            _policyContextBody.Children.Add(Label("환율·주식 만기는 주말만 제외하며 공휴일은 반영하지 않습니다. 코인은 달력일 기준입니다.", 10, Palette.TextDim));
         }
 
         private void RenderQuote(Quote quote)
         {
+            RenderPolicyContext(_utcNow());
             if (quote == null || !quote.Ok) return;
             if (_performance != null) {
-                try { PredictionJournal.Observe(quote, _utcNow()); _performance.Text = PredictionJournal.Summary(quote); }
+                try { PredictionJournal.Observe(quote, _utcNow()); _performance.Text = PredictionJournal.Summary(quote) + "\n\n" + ForecastReview.Yesterday(quote, _utcNow()); }
                 catch { _performance.Text = "예측 채점 기록 확인 실패"; }
             }
             _quoteSiteLink = _target.SiteLink(quote, _cfg.Bank);
@@ -559,10 +617,12 @@ namespace DeskWidget
         private void ChangeStyle()
         {
             if (_closed) return;
+            _analysisProgressTimer.Stop();
             bool extreme = _analysisMode.IsChecked == true;
             if (_refreshCancellation != null) _refreshCancellation.Cancel();
             if (_loginCancellation != null) _loginCancellation.Cancel();
             _sparkCard.Visibility = extreme && !_target.Weather ? Visibility.Visible : Visibility.Collapsed;
+            _modelComparison.Visibility = extreme && !_target.Weather ? Visibility.Visible : Visibility.Collapsed;
             if (_sparkCountdown.ContextMenu != null) _sparkCountdown.ContextMenu.IsOpen = false;
             ScheduleSparkRefresh();
             _analysisMode.Content = extreme ? "AI 전망" : "참고";
@@ -573,6 +633,7 @@ namespace DeskWidget
                 ClearResults();
                 _status.Text = (extreme ? "AI 전망" : "참고") + " 선택 · 갱신하면 자료를 확인합니다";
             }
+
         }
 
         internal async Task EnsureSparkLoginAsync()
@@ -581,14 +642,17 @@ namespace DeskWidget
             _loginCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
             var loginToken = _loginCancellation.Token;
             bool startAnalysis = false;
+            _sparkLoginRequired = false;
             _loginBusy = true; _refresh.IsEnabled = false; _sparkLogin.IsEnabled = false;
+
             _sparkState.Text = "로그인 상태 확인 중…";
-            UpdateSparkCountdown();
+            UpdateSparkCountdown(); UpdatePrimaryStatus(_lastRendered);
             try
             {
                 if (!await _checkLogin(loginToken))
                 {
                     if (_closed || loginToken.IsCancellationRequested) return;
+                    _sparkLoginRequired = true;
                     _sparkState.Text = "브라우저에서 로그인해 주세요…";
                     await _login(loginToken);
                     if (_closed || loginToken.IsCancellationRequested) return;
@@ -596,10 +660,7 @@ namespace DeskWidget
                 }
                 if (!_closed && !loginToken.IsCancellationRequested && _analysisMode.IsChecked == true)
                 {
-                    _sparkConnected = true;
-                    _sparkDot.Fill = Palette.Online; _sparkDot.ToolTip = "ChatGPT 로그인 확인됨";
-                    _sparkLogin.Content = "연결 해제";
-                    _sparkLogin.ToolTip = "이 창의 AI 분석과 자동 갱신을 끕니다. Codex 계정 로그인은 유지합니다.";
+                    ConnectSpark();
                     _sparkState.Text = "로그인됨 · 첫 분석 시작";
                     startAnalysis = true;
                 }
@@ -611,19 +672,30 @@ namespace DeskWidget
                 _loginBusy = false;
                 _loginCancellation.Dispose(); _loginCancellation = null;
                 if (_closed) { if (!_busy) _lifetime.Dispose(); }
-                else { _refresh.IsEnabled = true; _sparkLogin.IsEnabled = true; _analysisMode.IsEnabled = true; UpdateSparkCountdown(); }
+                else { _refresh.IsEnabled = true; _sparkLogin.IsEnabled = true; _analysisMode.IsEnabled = true;
+                    UpdateSparkCountdown(); UpdatePrimaryStatus(_lastRendered);  }
             }
             // 창을 열 때 실행한 일반 조회의 30초 제한 때문에 첫 AI 분석이 막히면 안 된다.
             if (startAnalysis && !_closed && _analysisMode.IsChecked == true) await RefreshCoreAsync(true);
         }
 
-        private void DisconnectSpark()
+        private void ConnectSpark()
         {
+            _sparkConnected = true; _sparkDisconnectedByUser = false; _sparkLoginRequired = false;
+            _sparkDot.Fill = Palette.Online; _sparkDot.ToolTip = "ChatGPT 로그인 확인됨";
+            _sparkLogin.Content = "연결 해제";
+            _sparkLogin.ToolTip = "이 창의 AI 분석과 자동 갱신을 끕니다. Codex 계정 로그인은 유지합니다.";
+        }
+
+        private void DisconnectSpark(bool byUser = true)
+        {
+            _sparkDisconnectedByUser = byUser;
+            _sparkLoginRequired = false;
             _sparkConnected = false; _sparkTimer.Stop(); _nextSparkAt = DateTime.MaxValue;
             _sparkDot.Fill = Palette.TextFaint; _sparkDot.ToolTip = "AI 연결 안 됨";
             _sparkLogin.Content = "로그인"; _sparkLogin.ToolTip = "로그인 확인 후 AI 분석 시작";
             _sparkState.Text = "AI 연결 해제 · 비교 기준만 갱신";
-            UpdateSparkCountdown();
+            UpdateSparkCountdown(); UpdatePrimaryStatus(_lastRendered);
         }
 
         private void ShowSparkIntervalMenu()
@@ -678,39 +750,45 @@ namespace DeskWidget
             await RefreshAsync();
         }
 
-        internal void ChangeModel(string model)
+        internal Task RefreshAsync() { return RefreshCoreAsync(false); }
+        internal void CancelRefresh()
         {
-            model = DollarSpark.ModelId(model); if (model == _model) return;
-            if (_refreshCancellation != null) _refreshCancellation.Cancel();
-            if (_loginCancellation != null) _loginCancellation.Cancel();
-            _model = model; _cfg.AnalysisModel = model; _cfg.Save();
-            _sparkLabel.Text = DollarSpark.ModelLabel(model) + " ▾";
-            _styleResults[1] = null; _sparkAutoPaused = true; _lastAttempt = DateTime.MinValue;
-            if (_analysisMode.IsChecked == true) ClearResults();
-            _sparkState.Text = "모델 변경 · 갱신을 눌러 분석하세요"; ScheduleSparkRefresh();
+            if (_closed || !_busy || _refreshCancellation == null) return;
+            _sparkAutoPaused = true; _analysisProgressTimer.Stop();
+            _status.Text = "분석 취소 중 · 자동 갱신 중지"; _refresh.IsEnabled = false; _refreshCancellation.Cancel();
         }
 
-        internal Task RefreshAsync() { return RefreshCoreAsync(false); }
+        private void UpdateComparisonInfo()
+        {
+            if (_closed) return;
+            Quote quote = _lastRendered == null ? null : _lastRendered.Quote;
+            _modelComparisonInfo.Text = ModelComparison.Current(_comparisonInput, _analysisRuns) + "\n\n" +
+                ModelComparison.Summary(quote) + (string.IsNullOrEmpty(_comparisonNotice) ? "" : "\n" + _comparisonNotice);
+        }
 
         private async Task RefreshCoreAsync(bool firstLogin)
         {
             if (_closed || _busy || _loginBusy) return;
+            bool extreme = _analysisMode.IsChecked == true;
+            // The first requested AI refresh must not be blocked by the opening quote fetch.
+            bool firstAiRefresh = extreme && !_target.Weather && !_sparkDisconnectedByUser && !_hasAiRefreshAttempt;
             var since = _utcNow() - _lastAttempt;
-            if (!firstLogin && since.TotalSeconds < 30)
+            if (!firstLogin && !firstAiRefresh && since.TotalSeconds < 30)
             {
                 _status.Text = "방금 조회했습니다 · " + Math.Ceiling(30 - since.TotalSeconds).ToString("0") + "초 후 다시 갱신할 수 있습니다";
                 return;
             }
             _busy = true;
-            bool extreme = _analysisMode.IsChecked == true;
+            _comparisonInput = null; _analysisRuns.Clear(); _comparisonNotice = null;
+            if (extreme) _hasAiRefreshAttempt = true;
             _refreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
             var refreshToken = _refreshCancellation.Token;
             _styleResults[_analysisMode.IsChecked == true ? 1 : 0] = null;
             _lastAttempt = _utcNow();
-            _refresh.IsEnabled = false;
+            _refresh.IsEnabled = true;
             _sparkLogin.IsEnabled = false;
-            _refresh.Content = "조회 중";
-            UpdateSparkCountdown();
+            _refresh.Content = "취소";
+            UpdateSparkCountdown(); UpdatePrimaryStatus(_lastRendered);
             _status.Text = _target.Name + " 시세와 국내외 뉴스를 확인하고 있습니다…";
             try
             {
@@ -719,29 +797,71 @@ namespace DeskWidget
                 if (result != null) result.RoundTripPercent = _roundTrip;
                 if (_closed || refreshToken.IsCancellationRequested) return;
                 if (result != null) result = result.ForStyle(extreme);
-                if (!_closed && result != null && _sparkConnected && !_target.Weather && extreme)
+                if (!_closed && result != null && !_sparkDisconnectedByUser && !_target.Weather && extreme)
                 {
                     result.Spark = null;
-                    _status.Text = "AI가 기사와 반대 근거를 분석하고 있습니다…";
+                    _checkingSparkLogin = true; _sparkLoginRequired = false;
+                    _sparkState.Text = "로그인 상태 확인 중…";
+                    _status.Text = "기존 ChatGPT 로그인을 확인하고 있습니다…";
+                    UpdatePrimaryStatus(_lastRendered);
                     try
                     {
                         bool loggedIn;
                         try { loggedIn = await _checkLogin(refreshToken); }
-                        catch { if (!_closed && !refreshToken.IsCancellationRequested) DisconnectSpark(); throw; }
+                        catch { if (!_closed && !refreshToken.IsCancellationRequested) DisconnectSpark(false); throw; }
                         if (_closed || refreshToken.IsCancellationRequested) return;
                         if (!loggedIn)
                         {
-                            if (_closed) return;
-                            DisconnectSpark();
-                            throw new InvalidOperationException("로그인이 만료됐습니다 · 다시 로그인해 주세요");
+                            DisconnectSpark(false);
+                            _sparkLoginRequired = true;
+                            throw new InvalidOperationException("로그인 확인 필요 · 로그인 버튼을 눌러 주세요");
                         }
-                        if (_closed) return;
-                        var spark = await _analyze(result, refreshToken);
+                        ConnectSpark();
+                        _checkingSparkLogin = false; _analyzingSpark = true;
+                        var input = new AnalysisInput(result, _utcNow(), true, _cfg.AnalysisReviewHistory);
+                        _comparisonInput = input; result = input.Source.Snapshot();
+                        foreach (string model in DollarSpark.ActiveModels) {
+                            refreshToken.ThrowIfCancellationRequested();
+                            _activeAnalysisModel = model; _analysisStartedAt = _utcNow();
+                            _analysisProgressTimer.Start(); UpdateAnalysisProgress();
+                            _status.Text = DollarSpark.ModelName(model) + "이 기사와 반대 근거를 분석하고 있습니다…";
+                            UpdatePrimaryStatus(_lastRendered);
+                            var run = new AnalysisRun { Model = model, InputId = input.Id };
+                            var elapsed = Stopwatch.StartNew(); _analysisRuns.Add(run);
+                            try {
+                                DollarSparkResult spark;
+                                if (_analyzeModel != null) spark = await _analyzeModel(input.Source.Snapshot(), refreshToken, model);
+                                else if (_injectedAnalysis) {
+                                    spark = await _analyze(input.Source.Snapshot(), refreshToken);
+                                    if (spark != null) spark.ModelId = model;
+                                } else spark = await DollarSpark.AnalyzePreparedAsync(input, refreshToken, model);
+                                refreshToken.ThrowIfCancellationRequested();
+                                var view = input.Source.Snapshot(); view.Spark = spark;
+                                if (spark == null || spark.ModelId != model || new[] { 1, 5, 20 }.Any(h => !DollarAnalysis.Score(view, h, _utcNow()).IsAi))
+                                    throw new InvalidDataException("AI 응답 검증 실패");
+                                spark.InputId = input.Id; spark.Effort = DollarSpark.ReasoningEffort; spark.ElapsedSeconds = elapsed.Elapsed.TotalSeconds;
+                                run.Result = spark; run.Outcome = "success";
+                            } catch (OperationCanceledException) { run.Outcome = "cancelled"; throw; }
+                            catch (Exception ex) {
+                                run.Error = DollarSpark.AnalysisError(ex);
+                                run.Outcome = run.Error.Contains("시간 초과") ? "timeout" : "error";
+                            } finally { elapsed.Stop(); run.Seconds = elapsed.Elapsed.TotalSeconds; _analysisProgressTimer.Stop(); }
+                        }
                         if (_closed || refreshToken.IsCancellationRequested) return;
-                        result.Spark = spark; result.SparkStatus = DollarSpark.ModelName(_model) + " 분석 완료" + (spark.MergedCitations > 0 ? " · 중복 인용 정리" : ""); _sparkAutoPaused = false;
+                        var selected = _analysisRuns.FirstOrDefault(r => r.Model == _model);
+                        result.Spark = selected == null ? null : selected.Result;
+                        _sparkAutoPaused = result.Spark == null;
+                        result.SparkStatus = result.Spark == null ? (selected == null ? "AI 분석 실패" : selected.Error) + " · 자동 갱신 중지" :
+                            DollarSpark.ModelName(_model) + " 분석 완료" + (result.Spark.MergedCitations > 0 ? " · 중복 인용 정리" : "");
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex) { _sparkAutoPaused = true; result.SparkStatus = DollarSpark.AnalysisError(ex) + " · 자동 갱신 중지"; }
+                    finally {
+                        _checkingSparkLogin = false; _analyzingSpark = false; _analysisProgressTimer.Stop(); _activeAnalysisModel = null;
+                        try { ModelComparison.SaveRuns(_comparisonInput, _analysisRuns, _utcNow()); }
+                        catch (IOException) { if (!_closed) _comparisonNotice = "실행 기록 저장 실패 · 폴더 확인"; }
+                        catch (UnauthorizedAccessException) { if (!_closed) _comparisonNotice = "실행 기록 저장 실패 · 쓰기 권한 확인"; }
+                    }
                     if (!_closed && !refreshToken.IsCancellationRequested) _sparkState.Text = (_sparkConnected ? "로그인됨 · " : "") + result.SparkStatus;
                 }
                 if (!_closed && !refreshToken.IsCancellationRequested) {
@@ -749,7 +869,11 @@ namespace DeskWidget
                     var recorded = result == null ? null : result.Snapshot();
                     Render(result);
                     if (recorded != null && _lastRendered != null) {
-                        try { PredictionJournal.Record(recorded, _utcNow()); _performance.Text = PredictionJournal.Summary(_lastRendered.Quote); }
+                        try {
+                            if (!PredictionJournal.Fresh(recorded.Quote, _utcNow())) _comparisonNotice = (_comparisonNotice == null ? "" : _comparisonNotice + "\n") + "입력 시세가 5분을 지나 예측 성적 기록을 생략했습니다.";
+                            PredictionJournal.Record(recorded, _utcNow()); _performance.Text = PredictionJournal.Summary(_lastRendered.Quote) + "\n\n" + ForecastReview.Yesterday(_lastRendered.Quote, _utcNow());
+                        }
+                        catch (System.IO.InvalidDataException) { _performance.Text = "예측 기록 저장 실패 · 자료 크기 한도 초과"; }
                         catch { _performance.Text = "예측 기록 저장 실패 · 폴더 쓰기 권한 확인"; }
                     }
                 }
@@ -762,7 +886,7 @@ namespace DeskWidget
                 _refreshCancellation.Dispose(); _refreshCancellation = null;
                 if (_closed) _lifetime.Dispose();
                 else { _refresh.IsEnabled = true; _refresh.Content = "↻ 갱신"; _sparkLogin.IsEnabled = !_target.Weather;
-                    _analysisMode.IsEnabled = true; ScheduleSparkRefresh(); }
+                    _analysisMode.IsEnabled = true; ScheduleSparkRefresh(); UpdatePrimaryStatus(_lastRendered);  UpdateComparisonInfo(); }
             }
         }
 
@@ -807,9 +931,7 @@ namespace DeskWidget
             _comparison.Visibility = _target.Weather ? Visibility.Collapsed : Visibility.Visible;
             _comparisonSummary.Visibility = primary ? Visibility.Visible : Visibility.Collapsed;
             _comparisonSummary.Text = "";
-            _primaryStatus.Text = _target.Weather ? "기상 예보" : primary ? "AI 주전망 · " + DollarSpark.ModelName(result.Spark.ModelId) + " · 성능 검증 중" :
-                result != null && !string.IsNullOrEmpty(result.SparkStatus) ? "주전망 생성 실패 · 비교 기준만 제공" :
-                _analysisMode.IsChecked == true ? "주전망 대기 · 로그인 후 분석하세요" : "주전망 대기 · AI 전망으로 전환해 분석하세요";
+            UpdatePrimaryStatus(result);
             if (primary && !_target.Weather) {
                 var basic = result.ForStyle(false);
                 _comparisonSummary.Text = "같은 입력 자료의 기본 계산 · AI와 비교 채점하는 기준입니다.\n";
@@ -974,6 +1096,7 @@ namespace DeskWidget
             _newsInfo.Text = "최근 24시간 · " + _target.Name + " 영향: 상승 " + upNews + " / 하락 " + downNews +
                 "\n선택 품목의 정책·수급·실적과 반대 해석을 표시합니다. 제목·요약·수집된 공개 본문 범위를 따릅니다.";
             _newsInfo.Text += "\n기사 " + result.News.Count + "건 · 본문 발췌 " + result.News.Count(n => n.BodyRead) + "건 · 추가 수집 " + result.TopicFeedsAvailable + "/" + result.TopicFeedsExpected;
+            _newsInfo.Text += MarketCoverageText(result, now);
             RenderNews(result, true, "국내", result.DomesticAvailable || result.News.Any(n => n.Domestic));
             RenderNews(result, false, "해외", result.GlobalAvailable || result.News.Any(n => !n.Domestic));
             bool any = (result.Quote != null && result.Quote.Ok) || result.Rates.Count > 0 || result.DomesticAvailable || result.GlobalAvailable;
@@ -981,9 +1104,55 @@ namespace DeskWidget
                 (any && (!result.DomesticAvailable || !result.GlobalAvailable || result.TopicFeedsAvailable < result.TopicFeedsExpected || result.Rates.Count == 0 || result.Quote == null || !result.Quote.Ok) ? " · 일부 자료 누락" : "");
             _status.Text += "\n" + (!result.Extreme ? "규칙 참고" : result.Spark != null ? DollarSpark.ModelName(result.Spark.ModelId) + " 분석" : string.IsNullOrEmpty(result.SparkStatus) ? "규칙 참고 · AI 미사용" : result.SparkStatus + " · 규칙 참고");
             _status.Text += " · " + (result.Spark != null ? "주전망" : "비교 기준");
+            if (result.MarketNewsFeedsExpected > 0 && result.MarketNewsFeedsAvailable == 0)
+                _status.Text += "\n시장 뉴스 갱신 실패 · 보관 자료는 최신 확인을 뜻하지 않습니다";
             if (result.Extreme && result.Spark == null) _status.Text += "\nAI 주전망은 아직 생성되지 않았습니다";
             if (_target.Economic) _method.Text = "현재 ECOS 공표값과 " + result.Rates.Count + "개 월간 관측값을 참고합니다. 월간 값을 일별 가격 패턴으로 바꾸지 않습니다.\n지표 예상값은 기사 근거와 현재 값이 있는 AI 응답의 절대 변화량으로 표시하며, 금리 변화는 %p입니다.";
             if (_target.Weather) { _brief.Text = "Open-Meteo 일평균 기온 예보입니다. 1개월 예보는 제공 범위를 벗어나 표시하지 않습니다."; _status.Text = "Open-Meteo 예보 · " + result.CheckedUtc.ToLocalTime().ToString("MM-dd HH:mm"); }
+        }
+
+        internal static string MarketCoverageText(DollarAnalysisResult result, DateTime now)
+        {
+            if (result.MarketNewsFeedsExpected == 0 && result.MarketNews.Count == 0) return "";
+            var news = result.MarketNews.Where(n => DollarSpark.EligibleNews(result, n, now)).ToList();
+            return "\nAI용 시장 전체 자료: 최근 24시간 " + news.Count(n => DollarSpark.IsCurrent(n, now)) +
+                "건 · 이전 7일 내 배경 " + news.Count(n => !DollarSpark.IsCurrent(n, now)) +
+                "건 · 수집 " + result.MarketNewsFeedsAvailable + "/" + result.MarketNewsFeedsExpected +
+                "\n배경 기사는 지속 여부를 재검토하며, 새로운 방향 근거로 단독 사용하지 않습니다.";
+        }
+
+        private void UpdatePrimaryStatus(DollarAnalysisResult result)
+        {
+            if (_target.Weather) _primaryStatus.Text = "기상 예보";
+            else if (_analysisMode.IsChecked != true) _primaryStatus.Text = "주전망 대기 · AI 전망으로 전환해 분석하세요";
+            else if (_loginBusy || _checkingSparkLogin) _primaryStatus.Text = "주전망 대기 · 로그인 확인 중…";
+            else if (_analyzingSpark && _refreshCancellation != null && !_refreshCancellation.IsCancellationRequested)
+                _primaryStatus.Text = "AI 주전망 · " + AnalysisProgressText();
+            else if (_busy) _primaryStatus.Text = "주전망 대기 · 시세와 뉴스 확인 중…";
+            else if (_sparkDisconnectedByUser) _primaryStatus.Text = "주전망 대기 · 연결 해제됨 · 로그인 버튼으로 다시 연결하세요";
+            else if (_sparkLoginRequired) _primaryStatus.Text = "주전망 대기 · 로그인 버튼으로 로그인한 뒤 분석하세요";
+            else if (result != null && result.Spark != null) _primaryStatus.Text = "AI 주전망 · " + DollarSpark.ModelName(result.Spark.ModelId) + " · 성능 검증 중";
+            else if (result != null && !string.IsNullOrEmpty(result.SparkStatus)) _primaryStatus.Text = "주전망 생성 실패 · 비교 기준만 제공";
+            else if (_sparkConnected) _primaryStatus.Text = "주전망 대기 · 로그인됨 · 갱신을 눌러 분석하세요";
+            else _primaryStatus.Text = "주전망 대기 · 갱신하면 기존 로그인을 확인합니다";
+        }
+
+        private string AnalysisProgressText()
+        {
+            int seconds = (int)Math.Max(0, (_utcNow() - _analysisStartedAt).TotalSeconds);
+            string model = _activeAnalysisModel ?? _model;
+            return DollarSpark.ModelName(model) + " 분석 중 · " + seconds.ToString(CultureInfo.InvariantCulture) +
+                "초 / 최대 " + (DollarSpark.AnalysisTimeoutSeconds(model) / 60).ToString(CultureInfo.InvariantCulture) + "분";
+        }
+
+        private void UpdateAnalysisProgress()
+        {
+            if (_closed || !_analyzingSpark || _analysisMode.IsChecked != true ||
+                _refreshCancellation == null || _refreshCancellation.IsCancellationRequested) {
+                _analysisProgressTimer.Stop(); return;
+            }
+            _sparkState.Text = "로그인됨 · " + AnalysisProgressText();
+            UpdatePrimaryStatus(_lastRendered);
         }
 
         private void RenderEvidence(DollarAnalysisResult result, DateTime now)
@@ -1019,6 +1188,7 @@ namespace DeskWidget
                     var n = entry.News; var text = new StackPanel();
                     text.Children.Add(Label(n.Title, 11, Palette.Text));
                     text.Children.Add(Label(n.Source + " · " + n.PublishedUtc.AddHours(9).ToString("MM-dd HH:mm") + " KST · " +
+                        (score.IsAi && !DollarSpark.IsCurrent(n, now) ? "배경 기사 · " : "") +
                         (n.BodyRead ? "공개 본문 발췌" : string.IsNullOrEmpty(n.Context) ? "제목" : "제목·요약"), 9.5, Palette.TextDim));
                     string role = entry.Role == "counter" ? "반대" : entry.Role == "mixed" ? "양면" : entry.Role == "support" ? "지지" : "참고";
                     text.Children.Add(Label(score.IsAi ? role + " · “" + entry.Quote + "”" : entry.CrossCheckOnly ? "다른 매체의 교차 확인 · 중복 점수 없음" :

@@ -1,3 +1,4 @@
+using TextBlock = DeskWidget.KoreanTextBlock;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -36,7 +37,7 @@ namespace DeskWidget
             var us = Target(SourceKind.Ecos, "INTL:US", "미국 정책금리");
             var kr = Target(SourceKind.Ecos, "INTL:KR", "한국 기준금리");
             Check(dollar.Dollar && !tree.Dollar && !yen.Dollar && !en.Dollar, "target identity uses label instead of kind/code");
-            Check(Config.AppVersion == "1.050" && Config.IsNewer("1.051") && !Config.IsNewer("1.050") && !Config.IsNewer("1.020"), "thousandth version update not detected");
+            Check(Config.AppVersion == "1.058" && Config.IsNewer("1.059") && !Config.IsNewer("1.058") && !Config.IsNewer("1.020"), "thousandth version update not detected");
             Check(tree.Format(131.42, new Quote { Unit = "USD" }) == "$131.42", "world price formatted as won");
             Check(en.Format(1581, new Quote { Unit = "JPY" }).EndsWith("JPY") && Sources.WorldPrice("1,581.0", "JPY") == "1,581.0 JPY", "Japanese stock incorrectly marked dollars");
             Check(yen.Format(871.63, null) == "871.63원" && index.Format(2636.46, null).EndsWith("pt"), "yen 100 or index unit converted incorrectly");

@@ -1,4 +1,5 @@
-﻿// 종목 추가 창 - 네이버 자동완성으로 한글 검색
+using TextBlock = DeskWidget.KoreanTextBlock;
+// 종목 추가 창 - 네이버 자동완성으로 한글 검색
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -123,7 +124,6 @@ namespace DeskWidget
                 Foreground = Palette.TextFaint,
                 Margin = new Thickness(0, 0, 0, 10),
                 TextWrapping = TextWrapping.Wrap,
-                LineHeight = 15,
             });
 
             // 입력창

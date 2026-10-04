@@ -227,6 +227,8 @@ namespace DeskWidget
             if (!string.IsNullOrEmpty(u.UserInfo)) return false; // user@host 형태 차단
 
             string host = u.Host.ToLowerInvariant();
+            // This daily review opens only its exact verified public reference URLs.
+            if (PolicyContext.IsSourceLink(url)) return true;
             // 뉴스 검색/리다이렉트 URL 전체를 허용하지 않고 기사 경로만 연다.
             if (host == "news.google.com" || DollarNewsSources.IsArticle(url)) return DollarAnalysis.IsNewsLink(url);
             foreach (string allowed in AllowedHosts)

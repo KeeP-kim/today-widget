@@ -11,6 +11,7 @@ namespace DeskWidget
     internal static class PredictionJournal
     {
         private static readonly object Gate = new object();
+        internal const int MaxRecordBytes = 8 * 1024 * 1024;
         internal static string Folder { get { return Path.Combine(Program.BaseDir, "prediction-history"); } }
         internal static DateTime Due(DateTime now, PredictionTarget target, int horizon)
         {
@@ -109,9 +110,9 @@ namespace DeskWidget
         private static XmlDocument Read(string path)
         {
             try {
-                if (new FileInfo(path).Length > 4194304) return null;
+                if (new FileInfo(path).Length > MaxRecordBytes) return null;
                 var doc = new XmlDocument { XmlResolver = null };
-                using (var reader = XmlReader.Create(path, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 4194304 })) doc.Load(reader);
+                using (var reader = XmlReader.Create(path, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = MaxRecordBytes })) doc.Load(reader);
                 return doc;
             } catch (XmlException) { return null; } catch (IOException) { return null; }
         }
@@ -123,6 +124,9 @@ namespace DeskWidget
             //   쓰지 않고 *.xml 검색에도 안 잡혀 보이지 않게 쌓인다.
             try {
                 using (var writer = XmlWriter.Create(temp, new XmlWriterSettings { Encoding = new System.Text.UTF8Encoding(false), Indent = true })) doc.Save(writer);
+                // XML escaping and UTF-8 can expand bounded article text. Never commit a record
+                // that the journal and rule ledger cannot read back with the same size limit.
+                if (new FileInfo(temp).Length > MaxRecordBytes) throw new InvalidDataException("Prediction record exceeds the supported size limit.");
                 File.Move(temp, path);
             } catch { try { if (File.Exists(temp)) File.Delete(temp); } catch (IOException) { } catch (UnauthorizedAccessException) { } throw; }
         }
@@ -151,6 +155,7 @@ namespace DeskWidget
                 //   2 로 남긴 옛 기록도 계속 읽는다(ValidRecord). 스키마를 올리면서
                 //   옛 기록을 버리면 애써 쌓은 표본이 통째로 사라진다.
                 root.SetAttribute("schema", "3"); root.SetAttribute("version", Config.AppVersion); root.SetAttribute("created", now.ToString("o"));
+                if (!string.IsNullOrEmpty(r.ComparisonInputId)) root.SetAttribute("comparisonInput", r.ComparisonInputId);
                 root.SetAttribute("identity", r.Quote.IdentityKey); root.SetAttribute("source", r.Quote.Source ?? "");
                 root.SetAttribute("unit", r.Target.Unit(r.Quote)); root.SetAttribute("anchor", S(PredictionTarget.Number(r.Quote)));
                 root.SetAttribute("quoteReceived", r.Quote.ReceivedUtc.ToString("o"));
@@ -165,11 +170,43 @@ namespace DeskWidget
                 root.SetAttribute("domestic", r.DomesticAvailable ? "1" : "0");
                 root.SetAttribute("global", r.GlobalAvailable ? "1" : "0");
                 root.SetAttribute("topicFeeds", r.TopicFeedsAvailable.ToString(CultureInfo.InvariantCulture) + "/" + r.TopicFeedsExpected.ToString(CultureInfo.InvariantCulture));
-                if (r.Spark != null && !string.IsNullOrEmpty(r.Spark.MarketSnapshot)) {
+                root.SetAttribute("marketFeeds", r.MarketNewsFeedsAvailable.ToString(CultureInfo.InvariantCulture) + "/" + r.MarketNewsFeedsExpected.ToString(CultureInfo.InvariantCulture));
+                var submitted = r.Spark ?? r.ComparisonResults.FirstOrDefault(a => a != null && a.InputId == r.ComparisonInputId);
+                if (submitted != null && !string.IsNullOrEmpty(submitted.PolicySnapshot) && submitted.PolicySnapshot != "null") {
+                    var policy = doc.CreateElement("aiPolicyContext"); policy.SetAttribute("policy", PolicyContext.Policy);
+                    policy.SetAttribute("submittedUtc", submitted.CheckedUtc.ToString("o"));
+                    policy.InnerText = submitted.PolicySnapshot; root.AppendChild(policy);
+                }
+                if (submitted != null && !string.IsNullOrEmpty(submitted.FeedbackSnapshot) && submitted.FeedbackSnapshot != "null") {
+                    var feedback = doc.CreateElement("aiPredictionReview"); feedback.SetAttribute("policy", ForecastReview.Policy);
+                    feedback.SetAttribute("submittedUtc", submitted.CheckedUtc.ToString("o"));
+                    feedback.InnerText = submitted.FeedbackSnapshot; root.AppendChild(feedback);
+                }
+                if (submitted != null && !string.IsNullOrEmpty(submitted.MarketSnapshot)) {
                     var input = doc.CreateElement("aiMarketInput");
-                    input.SetAttribute("model", DollarSpark.ModelId(r.Spark.ModelId));
-                    input.SetAttribute("submittedUtc", r.Spark.CheckedUtc.ToString("o"));
-                    input.InnerText = r.Spark.MarketSnapshot; root.AppendChild(input);
+                    input.SetAttribute("model", DollarSpark.ModelId(submitted.ModelId));
+                    input.SetAttribute("submittedUtc", submitted.CheckedUtc.ToString("o"));
+                    input.InnerText = submitted.MarketSnapshot; root.AppendChild(input);
+                }
+                // Preserve the exact submitted order. Nested marketArticle nodes stay outside the basic rule ledger.
+                if (submitted != null && submitted.SubmittedNews.Count > 0) {
+                    var input = doc.CreateElement("aiNewsInput");
+                    input.SetAttribute("policy", DollarSpark.InputPolicy);
+                    input.SetAttribute("submittedUtc", submitted.CheckedUtc.ToString("o"));
+                    int id = 0;
+                    foreach (var news in submitted.SubmittedNews.Take(100)) {
+                        var article = doc.CreateElement("marketArticle");
+                        article.SetAttribute("id", (++id).ToString(CultureInfo.InvariantCulture));
+                        article.SetAttribute("url", news.Url ?? "");
+                        article.SetAttribute("source", news.Source ?? "");
+                        article.SetAttribute("published", news.PublishedUtc.ToString("o"));
+                        article.SetAttribute("bodyRead", news.BodyRead ? "1" : "0");
+                        article.SetAttribute("origin", r.MarketNews.Contains(news) ? "broad-market" : "target-news");
+                        article.SetAttribute("recency", DollarSpark.IsCurrent(news, submitted.CheckedUtc) ? "current" : "background");
+                        article.InnerText = DollarSpark.SourceText(news);
+                        input.AppendChild(article);
+                    }
+                    root.AppendChild(input);
                 }
                 foreach (var news in r.News.Where(n => n.PublishedUtc <= now)) {
                     var e = doc.CreateElement("article"); e.SetAttribute("url", news.Url ?? ""); e.SetAttribute("published", news.PublishedUtc.ToString("o"));
@@ -214,7 +251,14 @@ namespace DeskWidget
                     var e = doc.CreateElement("rate"); e.SetAttribute("date", rate.Date.ToString("yyyy-MM-dd")); e.SetAttribute("value", S(rate.Value)); root.AppendChild(e);
                 }
                 var basic = r.ForStyle(false);
-                foreach (var current in r.Spark == null ? (r.Extreme ? new[] { basic, r } : new[] { basic }) : new[] { basic, r })
+                var views = new List<DollarAnalysisResult>(r.Spark == null ? (r.Extreme ? new[] { basic, r } : new[] { basic }) : new[] { basic, r });
+                foreach (var ai in r.ComparisonResults.Where(a => a != null && DollarSpark.ActiveModels.Contains(a.ModelId) &&
+                    a.InputId == r.ComparisonInputId && a.Extreme == r.Extreme && a.TargetKey == r.Target.Key)
+                    .GroupBy(a => a.ModelId).Select(g => g.First())) {
+                    if (r.Spark != null && ai.ModelId == r.Spark.ModelId) continue;
+                    var view = r.Snapshot(); view.Spark = ai; views.Add(view);
+                }
+                foreach (var current in views)
                 foreach (int h in new[] { 1, 5, 20 }) {
                     var p = current.Patterns.FirstOrDefault(x => x.Horizon == h) ?? (current.Pattern != null && current.Pattern.Horizon == h ? current.Pattern : null);
                     if (p == null || !DollarAnalysis.Fresh(p, now)) continue;
@@ -233,6 +277,10 @@ namespace DeskWidget
                     e.SetAttribute("articles", score.ArticleCount.ToString(CultureInfo.InvariantCulture));
                     e.SetAttribute("reviewed", score.ReviewedCount.ToString(CultureInfo.InvariantCulture));
                     if (current.Spark != null) {
+                        e.SetAttribute("inputPolicy", DollarSpark.InputPolicy);
+                        e.SetAttribute("inputId", current.Spark.InputId ?? "");
+                        e.SetAttribute("effort", current.Spark.Effort ?? "high");
+                        e.SetAttribute("elapsedSeconds", S(current.Spark.ElapsedSeconds));
                         var reason = current.Spark.Periods.First(x => x.Horizon == h);
                         e.InnerText = reason.Reason + "\n반박: " + reason.Counter + "\n전환: " + reason.Change;
                         e.SetAttribute("confidence", reason.Confidence ?? "");
@@ -351,7 +399,7 @@ namespace DeskWidget
                 var seen = new HashSet<string>();
                 foreach (XmlElement f in root.SelectNodes("forecast")) {
                     string model = f.GetAttribute("model"), h = f.GetAttribute("horizon");
-                    if (!new[] { "basic", "extreme-rule", DollarSpark.LegacyModel, DollarSpark.Model, "gpt-6-astra" }.Contains(model) || !new[] { "1", "5", "20" }.Contains(h) || !seen.Add(model + h)) return false;
+                    if (!(model == "basic" || model == "extreme-rule" || DollarSpark.HistoricalModel(model)) || !new[] { "1", "5", "20" }.Contains(h) || !seen.Add(model + h)) return false;
                     if (!Finite(N(f, "value")) || N(f, "value") <= 0 || T(f, "due") <= created || T(f, "due") > created.AddDays(45)) return false;
                 }
                 return seen.Count > 0;
@@ -482,6 +530,74 @@ namespace DeskWidget
                     (pending > 0 ? " · 미채점 " + pending + "건" : "") + (invalid > 0 ? " · 구형/손상 기록 제외 " + invalid + "건" : "");
             }
         }
+        internal static string ComparisonSummary(Quote q)
+        {
+            if (q == null || !Directory.Exists(Folder)) return "동일 자료 모델 성적 · 채점 대기";
+            var groups = new Dictionary<string, List<Tuple<DateTime, DateTime, XmlElement, XmlElement>>>(); int pending = 0;
+            lock (Gate) foreach (string path in Directory.GetFiles(Folder, "*.xml").Where(p => !p.EndsWith(".score.xml"))) {
+                if (!HeaderMatches(path, q.IdentityKey, q.Source)) continue;
+                var doc = Read(path); if (doc == null || !ValidRecord(doc.DocumentElement)) continue;
+                var root = doc.DocumentElement; string input = root.GetAttribute("comparisonInput");
+                if (input.Length != 64) continue;
+                for (int i = 0; i < DollarSpark.HistoricalModels.Length; i++)
+                for (int j = i + 1; j < DollarSpark.HistoricalModels.Length; j++)
+                foreach (string h in new[] { "1", "5", "20" }) {
+                    string left = DollarSpark.HistoricalModels[i], right = DollarSpark.HistoricalModels[j];
+                    var a = root.SelectSingleNode("forecast[@model='" + left + "'][@horizon='" + h + "']") as XmlElement;
+                    var b = root.SelectSingleNode("forecast[@model='" + right + "'][@horizon='" + h + "']") as XmlElement;
+                    if (a == null || b == null || a.GetAttribute("inputId") != input || b.GetAttribute("inputId") != input ||
+                        a.GetAttribute("effort") != DollarSpark.ReasoningEffort || a.GetAttribute("effort") != b.GetAttribute("effort") || a.GetAttribute("due") != b.GetAttribute("due") || StoredThreshold(a, int.Parse(h)) != StoredThreshold(b, int.Parse(h))) continue;
+                    var x = ReadScore(path + "." + left + "." + h + ".score.xml", root, a);
+                    var y = ReadScore(path + "." + right + "." + h + ".score.xml", root, b);
+                    if (x == null || y == null || x.GetAttribute("received") != y.GetAttribute("received") || N(x, "actual") != N(y, "actual")) { pending++; continue; }
+                    string key = left + "|" + right + "|" + h + "|" + Config.ScoringEra(root.GetAttribute("version")) + "|" + a.GetAttribute("effort");
+                    if (!groups.ContainsKey(key)) groups[key] = new List<Tuple<DateTime, DateTime, XmlElement, XmlElement>>();
+                    groups[key].Add(Tuple.Create(T(root, "created"), T(x, "received"), x, y));
+                }
+            }
+            var lines = new List<string> { "동일 자료 모델 성적 · 겹침 제외 · 관측 결과" };
+            foreach (var group in groups) {
+                DateTime end = DateTime.MinValue; var rows = new List<Tuple<DateTime, DateTime, XmlElement, XmlElement>>();
+                foreach (var row in group.Value.OrderBy(r => r.Item1)) { if (row.Item1 < end) continue; rows.Add(row); end = row.Item2; }
+                var key = group.Key.Split('|');
+                lines.Add(DollarSpark.ModelName(key[0]) + " / " + DollarSpark.ModelName(key[1]) + " · " + (key[2] == "1" ? "일간" : key[2] == "5" ? "주간" : "월간") +
+                    " · " + rows.Count + "건 · " + key[4] + " · 잣대 " + key[3] +
+                    "\n방향 " + (100 * rows.Average(r => N(r.Item3, "hit"))).ToString("0", CultureInfo.InvariantCulture) + "% / " +
+                    (100 * rows.Average(r => N(r.Item4, "hit"))).ToString("0", CultureInfo.InvariantCulture) + "% · 가격 오차 " +
+                    rows.Average(r => N(r.Item3, "error")).ToString("0.00", CultureInfo.InvariantCulture) + "% / " + rows.Average(r => N(r.Item4, "error")).ToString("0.00", CultureInfo.InvariantCulture) + "%");
+            }
+            lines.Add("표본 수와 기간을 함께 확인하세요. 이 비교만으로 모델의 우월함이 입증되지는 않습니다.");
+            if (pending > 0) lines.Add("채점 대기 " + pending + "쌍");
+            return string.Join("\n", lines);
+        }
+
+        internal static List<ForecastReviewRow> ReviewRows(Quote quote, DateTime now, DateTime from, DateTime until)
+        {
+            var rows = new List<ForecastReviewRow>();
+            if (quote == null || string.IsNullOrEmpty(quote.IdentityKey) || string.IsNullOrEmpty(quote.Source) || !Directory.Exists(Folder)) return rows;
+            lock (Gate) foreach (string path in Directory.GetFiles(Folder, "*.xml")) {
+                if (path.EndsWith(".score.xml", StringComparison.Ordinal) || !HeaderMatches(path, quote.IdentityKey, quote.Source)) continue;
+                var doc = Read(path); if (doc == null || doc.DocumentElement == null || !ValidRecord(doc.DocumentElement)) continue;
+                var root = doc.DocumentElement; DateTime created = T(root, "created");
+                if (created < from || created >= until || created > now) continue;
+                foreach (XmlElement forecast in root.SelectNodes("forecast")) {
+                    int horizon = int.Parse(forecast.GetAttribute("horizon"), CultureInfo.InvariantCulture);
+                    if (horizon != 1 && horizon != 5) continue;
+                    string model = forecast.GetAttribute("model"), scorePath = path + "." + model + "." + horizon + ".score.xml";
+                    var row = new ForecastReviewRow { Model = model, Version = root.GetAttribute("version"), Horizon = horizon,
+                        Created = created, Due = T(forecast, "due"), Anchor = N(root, "anchor"), Forecast = N(forecast, "value"),
+                        Reason = DollarAnalysis.Clean(forecast.InnerText, 700) };
+                    var score = ReadScore(scorePath, root, forecast);
+                    if (score != null && T(score, "received") <= now && row.Due <= now) {
+                        row.State = "scored"; row.Received = T(score, "received"); row.Actual = N(score, "actual");
+                        row.Error = N(score, "error"); row.BaselineError = N(score, "baselineError"); row.Hit = score.GetAttribute("hit") == "1";
+                    } else row.State = row.Due > now ? "pending" : File.Exists(scorePath) ? "invalid" : row.Due.AddHours(6) < now ? "missed" : "waiting";
+                    rows.Add(row);
+                }
+            }
+            return rows;
+        }
+
         private static XmlElement ReadScore(string path, XmlElement root, XmlElement forecast)
         {
             if (!File.Exists(path)) return null; var doc = Read(path); if (doc == null) return null; var e = doc.DocumentElement;

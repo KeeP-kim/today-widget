@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -18,6 +18,17 @@ namespace DeskWidget
 
         /// <summary>본문까지 읽을 기사 수. Program 이 설정에서 넣어 준다(Sources.EcosKey 와 같은 방식).</summary>
         public static int BodyLimit = Config.DefaultBodyLimit;
+        internal static bool Promotional(DollarNews news)
+        {
+            if (news == null) return false;
+            string source = Regex.Replace(news.Source ?? "", "[^A-Za-z0-9]", "").ToLowerInvariant();
+            if (source == "openpr" || source == "openprcom") return true;
+            string title = news.Title ?? "";
+            if (Regex.IsMatch(title, @"(?i)\b(fraud|scam|charges|lawsuit|warns|investigation)\b")) return false;
+            return Regex.IsMatch(title, @"(?i)\b(pre[ -]?sale|presale)\b") &&
+                Regex.IsMatch(title, @"(?i)\b(price prediction|best crypto|next bitcoin|100x|1000x)\b");
+        }
+
         public static bool IsArticle(string url)
         {
             Uri u;
